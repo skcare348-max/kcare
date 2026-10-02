@@ -1,6 +1,10 @@
 // 보호자 관리 — 연락 우선순위 · 알림 · 보고서 · 결제권한 · 소통이력 (요청서 8절 · 시안 보호자 통합관리).
 // 알림 상태 8종(NOTIFY_STATE)으로 발송→열람→응답을 구분하고, 정보 수정은 사유 필수 + 이력.
 import { useEffect, useState } from "react";
+import { useAppState } from "../../lib/state";
+import { useAuth } from "../../lib/auth";
+import { LIVE_TAG, liveGuardian } from "../../lib/live-household";
+import PhoneLink from "./PhoneLink";
 import { Panel, Stat, Pill, Avatar, Btn, Tabs, Table, KV, Field, Toggle, Drawer, Confirm, Stamp, Note, Empty, TONE } from "./ui";
 import Icon from "../icons";
 import { fmtWon } from "../../lib/config";
@@ -44,6 +48,11 @@ function Row({ id, label, hint, on, onChange }) {
 
 export default function GuardianMgmt({ openProfile }) {
   const [rows, setRows] = useState(GUARDIANS);
+  // 테스트 계정으로 들어왔으면 김민수(김순자 님 주 보호자) 줄에 테스트 가구 1 의 가입 상담 값 · 해주세요를 덮는다
+  const appState = useAppState()?.state;
+  const authUser = useAuth().user;
+  const liveOn = !!authUser?.household;
+  const shown = liveOn ? rows.map((g) => liveGuardian(g, appState, "test-guardian")) : rows;
   const [sel, setSel] = useState("G-001");
   const [tab, setTab] = useState("기본정보");
   const [q, setQ] = useState("");
@@ -63,7 +72,7 @@ export default function GuardianMgmt({ openProfile }) {
     return () => clearInterval(t);
   }, []);
 
-  const cur = rows.find((g) => g.id === sel) || rows[0];
+  const cur = shown.find((g) => g.id === sel) || shown[0];
   const update = (id, fn) => setRows((rs) => rs.map((g) => (g.id === id ? fn(g) : g)));
   const log = (g, field, before, after, reason) => ({ ...g, history: [logEntry({ field, before, after, reason }), ...g.history] });
   const addLog = (id, entry) => update(id, (g) => ({ ...g, log: [{ at: clock(), ...entry }, ...g.log] }));
@@ -76,14 +85,14 @@ export default function GuardianMgmt({ openProfile }) {
     { label: "보고서 미열람", value: GUARDIAN_STATS.unread, tone: "warn", on: () => preset("rep", "미열람"), active: f.rep === "미열람" },
     { label: "연락 확인 필요", value: GUARDIAN_STATS.contact, tone: "warn", on: () => preset("contact", "확인 필요"), active: f.contact === "확인 필요" },
   ];
-  const list = rows
+  const list = shown
     .filter((g) => !q || g.name.includes(q) || g.elders.some((e) => e.name.includes(q)) || g.tel.includes(q))
     .filter((g) => f.role === F.role || g.role === f.role)
     .filter((g) => f.where === F.where || (f.where === "해외" ? isAbroad(g) : !isAbroad(g)))
     .filter((g) => f.rep === F.rep || (f.rep === "미열람" ? isUnread(g) : !isUnread(g)))
     .filter((g) => f.pay === F.pay || (f.pay === "승인자" ? g.payer : !g.payer))
     .filter((g) => f.contact === F.contact || (f.contact === "확인 필요" ? g.contact !== "정상" : g.contact === "정상"))
-    .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    .sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0) || rank(a) - rank(b) || a.name.localeCompare(b.name));
 
   const elderBtn = (e) =>
     openProfile ? (
@@ -92,12 +101,12 @@ export default function GuardianMgmt({ openProfile }) {
       <span key={e.name} className="mr-1">{e.name}({e.age})</span>
     );
   const cols = [
-    { k: "name", label: "보호자", render: (g) => <span className="flex items-center gap-2"><Avatar name={g.name} size={30} tone="info" /><span className="font-bold text-navy">{g.name}</span></span> },
+    { k: "name", label: "보호자", render: (g) => <span className="flex items-center gap-2"><Avatar name={g.name} size={30} tone="info" /><span className="font-bold text-navy">{g.name}</span>{g.live ? <Pill tone="ok">실제</Pill> : liveOn ? <span className="text-[11px] text-muted">예시</span> : null}</span> },
     { k: "rel", label: "관계 · 역할", render: (g) => <span className="inline-flex items-center gap-1">{g.rel} <Pill tone={ROLE_TONE[g.role]}>{g.role}</Pill></span> },
     { k: "elders", label: "담당 어르신", render: (g) => g.elders.map(elderBtn) },
     { k: "where", label: "거주 · 현지시간", render: (g) => <><span style={isAbroad(g) ? { color: TONE.info.fg, fontWeight: 700 } : undefined}>{g.region}</span> · <span className="font-num">{localClock(now, g.tz)}</span></> },
     { k: "report", label: "보고서", render: (g) => <span className={isUnread(g) ? "font-bold text-gold" : ""}>{g.report}</span> },
-    { k: "pay", label: "결제 · 연락", render: (g) => <><span className="block text-[12px]">{g.payer ? `${fmtWon(g.payLimit)} 승인` : "열람 전용"}</span><Pill tone={CONTACT_TONE[g.contact]}>{g.contact}</Pill></> },
+    { k: "pay", label: "결제 · 연락", render: (g) => <><span className="block text-[12px]">{g.payMode || (g.payer ? `${fmtWon(g.payLimit)} 승인` : "열람 전용")}</span><Pill tone={CONTACT_TONE[g.contact]}>{g.contact}</Pill></> },
   ];
 
   const editFields = cur
@@ -124,7 +133,7 @@ export default function GuardianMgmt({ openProfile }) {
     const tel = form.tel.replace(/\D/g, "");
     const g = {
       id: `G-${Date.now()}`, name: form.name.trim(), rel: form.rel, role: form.role, elders: [{ ...e, role: form.role }],
-      region: form.region.trim() || form.tz.split(" ")[0], tz: TZ[form.tz], tel: tel.length >= 10 ? `${tel.slice(0, 3)}-${tel.slice(3, 5)}**-${tel.slice(-4, -2)}**` : "미입력",
+      region: form.region.trim() || form.tz.split(" ")[0], tz: TZ[form.tz], tel: tel.length >= 10 ? `${tel.slice(0, 3)}-${tel.slice(3, -4)}-${tel.slice(-4)}` : "미입력",
       hours: "08:00–22:00", night: form.night, consent: { call: form.call, sms: form.sms, push: form.push }, sosOrder: Number(form.sos), scope: form.scope, reportVia: form.via,
       report: "발송 전", payer: form.payer, payLimit: form.payer ? Number(form.limit) || 0 : null, contact: "정상", app: { state: "초대 발송 · 가입 대기", last: "—" },
       emergency: form.role === "주" ? "119 신고 · 현장출동 동의 (서명 대기)" : "열람 동의", requests: [], complaints: [], reports: [], payments: [],
@@ -151,7 +160,7 @@ export default function GuardianMgmt({ openProfile }) {
       return (
         <div>
           <Sec title="연락 및 거주정보">
-            <KV k="휴대전화" v={cur.tel} mono />
+            <KV k="휴대전화" v={<PhoneLink phone={cur.tel} source={cur.telSource} />} />
             <KV k="거주지역" v={cur.region} />
             {isAbroad(cur) && <KV k="현지시간" v={<span className="font-num">{localClock(now, cur.tz)} <span className="text-muted">(KST {localClock(now, 0)} · 시차 {cur.tz > 0 ? "+" : ""}{cur.tz}h)</span></span>} />}
             <KV k="연락 가능시간" v={cur.hours} />
@@ -177,7 +186,7 @@ export default function GuardianMgmt({ openProfile }) {
         <div>
           <KV k="고객정보 열람범위" v={cur.scope} />
           <KV k="보고서 수신" v={cur.reportVia} />
-          <KV k="결제 승인" v={cur.payer ? `승인자 · 1회 ${fmtWon(cur.payLimit)} 한도` : "권한 없음 (열람 전용)"} tone={cur.payer ? "ok" : undefined} />
+          <KV k="결제 승인" v={cur.payMode ? `${cur.payMode} (가입 상담)` : cur.payer ? `승인자 · 1회 ${fmtWon(cur.payLimit)} 한도` : "권한 없음 (열람 전용)"} tone={cur.payer ? "ok" : undefined} />
           <KV k="긴급조치 동의" v={cur.emergency} />
           <KV k="SOS 연락 우선순위" v={`${cur.sosOrder}순위`} />
           <KV k="야간 연락 가능" v={cur.night ? "예" : "아니오"} />
@@ -228,7 +237,7 @@ export default function GuardianMgmt({ openProfile }) {
           <p className="mt-0.5 text-[13px] text-muted">연락 우선순위 · 알림 · 보고서 · 결제권한 및 소통이력을 관리합니다.</p>
         </div>
         <div className="flex gap-2">
-          <Btn ghost onClick={() => setMsg("엑셀 다운로드는 권한 확인 후 제공됩니다 · 연락처는 마스킹 상태로 · 다운로드는 감사로그에 기록")}><span className="inline-flex items-center gap-1"><Icon name="download" size={14} /> 엑셀 다운로드</span></Btn>
+          <Btn ghost onClick={() => setMsg("엑셀 다운로드는 권한 확인 후 제공됩니다 · 다운로드는 감사로그에 기록")}><span className="inline-flex items-center gap-1"><Icon name="download" size={14} /> 엑셀 다운로드</span></Btn>
           <Btn onClick={() => setReg(true)}><span className="inline-flex items-center gap-1"><Icon name="plus" size={14} /> 신규 보호자 등록</span></Btn>
         </div>
       </div>
@@ -249,6 +258,12 @@ export default function GuardianMgmt({ openProfile }) {
       </Panel>
 
       {msg && <Note tone="ok">{msg}</Note>}
+      {liveOn && (
+        <Note tone="ok">
+          <b>{LIVE_TAG}</b> — 김민수 님 줄은 테스트 가구의 실제 기록입니다 (가입 상담 연락처 · 관계 · 결제권한, 보낸 해주세요).
+          {shown.find((g) => g.live)?.onboarded ? "" : " 보호자가 가입 상담을 마치면 연락처가 실제 값으로 바뀝니다."} 나머지 보호자는 예시입니다.
+        </Note>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
         <Panel>
@@ -267,6 +282,7 @@ export default function GuardianMgmt({ openProfile }) {
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-[17px] font-bold text-navy">{cur.name} 보호자</h2>
+                  {cur.live && <Pill tone="ok">{LIVE_TAG}</Pill>}
                   <Pill tone={ROLE_TONE[cur.role]}>{cur.role} 보호자</Pill>
                   <Pill tone="gold">{cur.sosOrder}순위 연락</Pill>
                   <Pill tone={CONTACT_TONE[cur.contact]}>{cur.contact}</Pill>
@@ -313,7 +329,7 @@ export default function GuardianMgmt({ openProfile }) {
           </div>
           <Field id="gr-elder" label="연결 어르신" value={form.elder} onChange={setF("elder")} options={ELDERS} hint="등록 후 [+ 어르신 연결]로 복수 연결" />
           <div className="grid gap-3 sm:grid-cols-3">
-            <Field id="gr-tel" label="휴대전화" value={form.tel} onChange={setF("tel")} placeholder="010-0000-0000" hint="저장 시 마스킹" />
+            <Field id="gr-tel" label="휴대전화" value={form.tel} onChange={setF("tel")} placeholder="010-0000-0000" hint="관제 화면에는 전체 번호로 보입니다" />
             <Field id="gr-region" label="거주지역" value={form.region} onChange={setF("region")} placeholder="서울 강남구" />
             <Field id="gr-tz" label="해외 시간대" value={form.tz} onChange={setF("tz")} options={Object.keys(TZ)} />
           </div>

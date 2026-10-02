@@ -1,7 +1,7 @@
 import ModeLink from "../components/ModeLink";
 import Head from "next/head";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, SectionLabel, PrimaryButton, GhostButton, Badge, Avatar } from "../components/ui";
 import Icon from "../components/icons";
 import VisitFlow from "../components/VisitFlow";
@@ -54,6 +54,8 @@ import { fmtWon } from "../lib/config";
 import { useAppState } from "../lib/state";
 import { supplementSlotNote } from "../lib/meds";
 import Splash from "../components/Splash";
+import { LIVE_ELDER, liveCustomer, telHref } from "../lib/ops-health";
+import { ringAlarm } from "../lib/alarm";
 
 // 컨시어지 앱 — REQ-09(동선·주소 게이팅) · REQ-10(케어박스) · REQ-11(관찰 리포트)
 // · REQ-12(감사 타임라인·영상) + 디자인 콘솔 정합 (오늘·리포트·제안·정산 4탭).
@@ -108,6 +110,29 @@ export default function ConciergePage() {
   const [reqSent, setReqSent] = useState(false);
   const [pairCalled, setPairCalled] = useState(false);
   const [sosAck, setSosAck] = useState(false); // 관제 급파 수락 원샷
+  // 관제에 알리기 — 가구 기록(opsMessages)에 남겨 관제가 확인 · 답할 수 있게 (2026-10-02). 알림판에도 한 줄.
+  const [opsMsgText, setOpsMsgText] = useState("");
+  const opsMsgs = (state.opsMessages || []).filter((m) => m.role === "concierge");
+  const hm = (t) => new Date(t).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const sendOpsMsg = (text) => {
+    if (!text) return;
+    dispatch({ type: "addOpsMessage", payload: { from: "컨시어지 박지현", role: "concierge", text } });
+    push("관제 연락", `컨시어지 박지현 — ${text}`, "#8FA9CC");
+    setOpsMsgText("");
+  };
+  // 어르신 SOS — 시각 · 어르신 번호(테스트 가구는 가입 상담에서 받은 번호) · 알림음 (2026-10-02)
+  const sosTime = state.demo.sos && state.demo.sosAt
+    ? new Date(state.demo.sosAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
+    : null;
+  const elderTel = telHref(liveCustomer(LIVE_ELDER, state.onboarding).phone);
+  const rangFor = useRef("");
+  useEffect(() => {
+    if (!state.demo.sos) return;
+    const key = `${state.demo.sosAt || "on"}:${state.ops.sosDispatched ? "dispatched" : "new"}`;
+    if (rangFor.current === key) return;
+    rangFor.current = key;
+    ringAlarm();
+  }, [state.demo.sos, state.demo.sosAt, state.ops.sosDispatched]);
   const [voiceMood, setVoiceMood] = useState(null); // 현장의 소리 — 마음 체크인
   const [voiceType, setVoiceType] = useState(null);
   const [voiceText, setVoiceText] = useState("");
@@ -122,11 +147,25 @@ export default function ConciergePage() {
   const [earlyPay, setEarlyPay] = useState(false);
   // 거주 형태 토글 — 기본값은 가입 때 저장한 값 (DB: care_location_type · 실무자 피드백)
   const [careLoc, setCareLoc] = useState(state.onboarding?.careLocation || "home");
-  const [checkDone, setCheckDone] = useState({}); // 21항목 체크 — {"몸-혈압": true}
+  // 21항목 점검 · 항목 메모 · 총평 · 사진 수는 가구 기록(state.visit)에 둔다 — 관제 방문관리가 같은 값을 보고,
+  // 새로고침해도 남는다 (2026-10-02). 메모는 쓰는 동안은 이 화면에만 두고, 칸을 벗어날 때 한 번 보낸다.
+  const checkDone = state.visit.checks || {}; // 21항목 체크 — {"몸-혈압": {at}}
   const [openItem, setOpenItem] = useState(null); // 항목별 내용 입력 열림
-  const [itemNote, setItemNote] = useState({}); // 항목별 기록
-  const [summaryNote, setSummaryNote] = useState(""); // 총평 메모
-  const [photos, setPhotos] = useState([]); // 현장 사진 (데모)
+  const [itemDraft, setItemDraft] = useState({}); // 쓰는 중인 항목 메모
+  const itemNote = { ...(state.visit.notes || {}), ...itemDraft };
+  const saveItemNote = (key) => {
+    if (!(key in itemDraft)) return;
+    if ((itemDraft[key] || "") !== ((state.visit.notes || {})[key] || "")) dispatch({ type: "visitNote", key, text: itemDraft[key] });
+    setItemDraft(({ [key]: _, ...rest }) => rest);
+  };
+  const [summaryDraft, setSummaryDraft] = useState(null); // 쓰는 중인 총평
+  const summaryNote = summaryDraft ?? state.visit.memo ?? "";
+  const saveSummary = () => {
+    if (summaryDraft == null) return;
+    if (summaryDraft !== (state.visit.memo || "")) dispatch({ type: "visitNote", text: summaryDraft });
+    setSummaryDraft(null);
+  };
+  const photos = Array.from({ length: state.visit.photos || 0 }, (_, i) => `현장사진_${i + 1}.jpg`); // 현장 사진 (데모 — 장수만)
   const [preview, setPreview] = useState(false); // 증빙 보고서 발행 전 미리보기
   const v = state.visit;
   const videoConsent = state.onboarding ? !!state.onboarding.videoConsent : true; // 데모 기본 동의
@@ -203,7 +242,12 @@ export default function ConciergePage() {
   const wrapUp = today.rows.find((r) => r.state === "done" && !v.reportSent)?.client || null;
 
   // ── 마음사서함 (2026-09-22 명세) ──
-  const mb = useMailbox();
+  // 어르신이 앱에서 보낸 목소리(→ 컨시어지)를 받은 음성메시지에 붙인다
+  const elderVoices = useMemo(
+    () => (state.voices || []).filter((x) => x.to === "컨시어지").map((x) => ({ ...x, client: String(x.from || "").replace(/ 님$/, "") })),
+    [state.voices]
+  );
+  const mb = useMailbox(elderVoices);
   // 확인전화 — 아직 안 한 것 (시트 오늘 3번)
   const callsLeft = CALL_CHECKS.reduce(
     (n, c) => n + c.steps.filter((s) => !(callDone[`${c.id}-${s.k}`] ?? s.done)).length,
@@ -253,6 +297,54 @@ export default function ConciergePage() {
           </header>
 
           <main className="flex-1 space-y-3.5 overflow-y-auto px-4 pb-28 pt-4">
+            {/* ── 어르신 SOS — 어느 탭에 있든 맨 위에 (2026-10-02 현장 요청: "어르신 SOS 가 컨시어지에 알람 안 뜸").
+                급파 지시 전에는 '관제 확인 중' + 어르신께 바로 전화, 급파 지시가 오면 수락 버튼. ── */}
+            {state.demo.sos && !state.ops.sosDispatched && (
+              <div role="alert" className="animate-sosPulse rounded-2xl bg-danger p-4 text-white">
+                <div className="text-[12px] font-bold tracking-[.14em] opacity-85">긴급 · 어르신 SOS</div>
+                <div className="mt-1 text-[18px] font-bold leading-[1.4]">김순자님이 SOS를 눌렀습니다</div>
+                <div className="mt-0.5 text-[13px] opacity-90">
+                  {sosTime ? `${sosTime} · ` : ""}관제센터가 확인 중입니다. 급파 지시가 오면 여기서 수락합니다.
+                </div>
+                <div className="mt-3 flex gap-2">
+                  {elderTel ? (
+                    <a href={elderTel} className="btn-press flex-1 rounded-[10px] bg-white py-3 text-center text-[16px] font-bold text-danger">
+                      어르신께 전화
+                    </a>
+                  ) : null}
+                  <button
+                    onClick={() => setOpsMsgOpen(true)}
+                    className="btn-press flex-1 rounded-[10px] border border-white/70 py-3 text-[15px] font-bold"
+                  >
+                    관제에 알리기
+                  </button>
+                </div>
+              </div>
+            )}
+            {/* 관제 급파 → 컨시어지 긴급 배너 — 역할 간 실시간 연동 (SOS + 급파 지시 시) · 모든 탭 맨 위 */}
+            {state.demo.sos && state.ops.sosDispatched && (
+              <div role="alert" className="animate-sosPulse rounded-2xl bg-danger p-4 text-white">
+                <div className="text-[12px] font-bold tracking-[.14em] opacity-85">긴급 급파 · 관제 지시</div>
+                <div className="mt-1 text-[18px] font-bold leading-[1.4]">
+                  김순자님 SOS — 최근접 동행자로 지정되었습니다
+                </div>
+                <div className="mt-0.5 text-[13px] opacity-90">
+                  대치동 자택 1.2km · 서다인(부)과 2인 급파 · 도착 예정 6분
+                </div>
+                <button
+                  onClick={() => {
+                    if (sosAck) return;
+                    setSosAck(true);
+                    push("대응", "박지현 급파 수락 — 이동 시작 (도착 예정 6분)", "#FF8A80");
+                  }}
+                  disabled={sosAck}
+                  className="btn-press mt-3 w-full rounded-[10px] bg-white py-3 text-[16px] font-bold text-danger disabled:opacity-80"
+                >
+                  {sosAck ? "✓ 수락됨 — 이동 중 (관제 공유)" : "급파 수락 · 이동 시작"}
+                </button>
+              </div>
+            )}
+
             {/* ════ 오늘 — 출근해서 제일 먼저 보는 것 ════ */}
             {tab === "today" && (
               <>
@@ -402,30 +494,6 @@ export default function ConciergePage() {
                   </Card>
                 )}
 
-
-                {/* 관제 급파 → 컨시어지 긴급 배너 — 역할 간 실시간 연동 (SOS + 급파 지시 시) */}
-                {state.demo.sos && state.ops.sosDispatched && (
-                  <div className="animate-sosPulse rounded-2xl bg-danger p-4 text-white">
-                    <div className="text-[12px] font-bold tracking-[.14em] opacity-85">긴급 급파 · 관제 지시</div>
-                    <div className="mt-1 text-[18px] font-bold leading-[1.4]">
-                      김순자님 SOS — 최근접 동행자로 지정되었습니다
-                    </div>
-                    <div className="mt-0.5 text-[13px] opacity-90">
-                      대치동 자택 1.2km · 서다인(부)과 2인 급파 · 도착 예정 6분
-                    </div>
-                    <button
-                      onClick={() => {
-                        if (sosAck) return;
-                        setSosAck(true);
-                        push("대응", "박지현 급파 수락 — 이동 시작 (도착 예정 6분)", "#FF8A80");
-                      }}
-                      disabled={sosAck}
-                      className="btn-press mt-3 w-full rounded-[10px] bg-white py-3 text-[16px] font-bold text-danger disabled:opacity-80"
-                    >
-                      {sosAck ? "✓ 수락됨 — 이동 중 (관제 공유)" : "급파 수락 · 이동 시작"}
-                    </button>
-                  </div>
-                )}
 
                 {state.demo.offline && (
                   <div className="rounded-[14px] border border-amber/30 bg-gradient-to-b from-[#FFF7E8] to-[#FBEFD8] p-3.5">
@@ -1155,7 +1223,7 @@ export default function ConciergePage() {
                                 <div key={key}>
                                   <div className="flex items-center gap-1.5">
                                     <button
-                                      onClick={() => setCheckDone((s) => ({ ...s, [key]: !s[key] }))}
+                                      onClick={() => dispatch({ type: "visitCheck", key, done: !on })}
                                       className={`btn-press btn-inline btn-chip shrink-0 rounded-full border px-2.5 py-1.5 text-[12px] font-bold ${
                                         on ? "border-green/40 bg-green/10 text-green" : "border-navy/15 text-muted"
                                       }`}
@@ -1178,7 +1246,8 @@ export default function ConciergePage() {
                                       autoFocus
                                       rows={2}
                                       value={itemNote[key] || ""}
-                                      onChange={(e) => setItemNote((s) => ({ ...s, [key]: e.target.value }))}
+                                      onChange={(e) => setItemDraft((s) => ({ ...s, [key]: e.target.value }))}
+                                      onBlur={() => saveItemNote(key)}
                                       placeholder={`${i.k} — ${i.w}`}
                                       className="animate-tickIn mt-1.5 w-full resize-none rounded-lg border border-gold/50 px-2.5 py-2 text-[13px] leading-[1.6] outline-none"
                                     />
@@ -1198,7 +1267,8 @@ export default function ConciergePage() {
                     <textarea
                       rows={3}
                       value={summaryNote}
-                      onChange={(e) => setSummaryNote(e.target.value)}
+                      onChange={(e) => setSummaryDraft(e.target.value)}
+                      onBlur={saveSummary}
                       placeholder="항목으로 나눠 적기 어려운 것, 지난달과 달라진 인상, 보호자께 꼭 전할 말을 적습니다."
                       className="mt-2 w-full resize-none rounded-lg border border-navy/15 px-3 py-2.5 text-[13.5px] leading-[1.7] outline-none focus:border-gold"
                     />
@@ -1210,7 +1280,7 @@ export default function ConciergePage() {
                         </span>
                       ))}
                       <button
-                        onClick={() => setPhotos((v) => [...v, `현장사진_${v.length + 1}.jpg`])}
+                        onClick={() => dispatch({ type: "visitPhoto" })}
                         className="btn-press btn-inline btn-chip rounded-lg border border-navy/20 px-2.5 py-1.5 text-[11.5px] font-bold text-navy"
                       >
                         + 사진 첨부 (데모)
@@ -2290,16 +2360,49 @@ export default function ConciergePage() {
                 {OPS_MESSAGE_PRESETS.map((m) => (
                   <button
                     key={m}
-                    onClick={() => {
-                      push("관제 연락", `컨시어지 박지현 — ${m}`, "#8FA9CC");
-                      setOpsMsgOpen(false);
-                    }}
+                    onClick={() => sendOpsMsg(m)}
                     className="btn-press w-full rounded-xl border border-navy/15 px-3.5 py-3 text-left text-[14px] font-bold text-navy"
                   >
                     {m}
                   </button>
                 ))}
               </div>
+              {/* 직접 쓰기 — 버튼에 없는 말 (2026-10-02) */}
+              <div className="mt-3 flex gap-2">
+                <input
+                  aria-label="관제에 보낼 말 직접 쓰기"
+                  value={opsMsgText}
+                  onChange={(e) => setOpsMsgText(e.target.value)}
+                  placeholder="직접 쓰기"
+                  className="min-w-0 flex-1 rounded-xl border border-navy/15 px-3.5 py-3 text-[14px] outline-none focus:border-gold"
+                />
+                <button
+                  onClick={() => sendOpsMsg(opsMsgText.trim())}
+                  disabled={!opsMsgText.trim()}
+                  className="btn-press btn-dark shrink-0 rounded-xl bg-navy px-4 text-[14px] font-bold text-white disabled:opacity-40"
+                >
+                  보내기
+                </button>
+              </div>
+              {/* 보낸 것 — 관제가 확인하면 시각과 답이 여기 붙는다 */}
+              {opsMsgs.length > 0 && (
+                <div className="mt-4 border-t border-navy/10 pt-3">
+                  <div className="text-[12px] font-bold text-muted">보낸 연락</div>
+                  <ul className="mt-1.5 space-y-1.5">
+                    {opsMsgs.slice(0, 5).map((m) => (
+                      <li key={m.id} className="rounded-lg bg-navy/[.04] px-3 py-2 text-[13px]">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="min-w-0 text-ink">{m.text}</span>
+                          <span className={`shrink-0 text-[11.5px] font-bold ${m.ackAt ? "text-green" : "text-amber"}`}>
+                            {m.ackAt ? `관제 확인 ${hm(m.ackAt)}` : "확인 전"}
+                          </span>
+                        </div>
+                        {m.reply && <div className="mt-1 text-[12.5px] font-bold text-navy">관제 답 — {m.reply}</div>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </Sheet>
           )}
 
