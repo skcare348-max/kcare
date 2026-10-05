@@ -1,8 +1,8 @@
 import ModeLink from "../components/ModeLink";
 import Head from "next/head";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, SectionLabel, PrimaryButton, GhostButton, Badge, Avatar } from "../components/ui";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Card, SectionLabel, Badge, Avatar } from "../components/ui";
 import Icon from "../components/icons";
 import VisitFlow from "../components/VisitFlow";
 import {
@@ -48,16 +48,24 @@ import {
   useToday,
 } from "../components/ConciergeToday";
 import { checkupFor, REPORT_HEADLINE } from "../lib/checkup";
+import { requiredFor } from "../lib/ops-mgmt";
+import { RESULT_TONE, VISIT_GRADES } from "../lib/visit-report";
 import { STORE_CATALOG } from "../lib/store";
-import { SERVICE_MENU, STATUS } from "../lib/requests";
+import { SERVICE_MENU, daysUntil, kstYmd } from "../lib/requests";
+import ConciergeRequests from "../components/ConciergeRequests";
+import { HelpCallCard, HelpCallPopup } from "../components/HelpCall";
+import { LIVE_CONCIERGE } from "../lib/live-household";
 import { fmtWon } from "../lib/config";
 import { useAppState } from "../lib/state";
-import { supplementSlotNote } from "../lib/meds";
+import { useAuth } from "../lib/auth";
+import { healthOf, supplementSlotNote } from "../lib/meds";
+import { HealthEditor, HealthSummary } from "../components/HealthInfo";
 import Splash from "../components/Splash";
 import { LIVE_ELDER, liveCustomer, telHref } from "../lib/ops-health";
 import { ringAlarm } from "../lib/alarm";
+import RoleGate from "../components/RoleGate";
 
-// 컨시어지 앱 — REQ-09(동선·주소 게이팅) · REQ-10(케어박스) · REQ-11(관찰 리포트)
+// 컨시어지 앱 — REQ-09(동선·주소 게이팅) · REQ-11(관찰 리포트). REQ-10(케어박스)은 2026-10-02 운영 결정으로 뺐다.
 // · REQ-12(감사 타임라인·영상) + 디자인 콘솔 정합 (오늘·리포트·제안·정산 4탭).
 // 절대 규칙(원칙 유지): 평가·보상에 판매액 없음 (업셀링 인센티브 → 케어 품질 인센티브로 대체)
 // · 의료 측정값 입력 없음 · 소견/진단 기재 금지 · 1인 진입 금지(2인 체크인) · 제안은 근거 동반.
@@ -80,22 +88,30 @@ const TABS = [
   // { key: "pay", label: "정산", icon: "coin" },
 ];
 
-export default function ConciergePage() {
+function ConciergePage() {
   const { state, dispatch } = useAppState();
+  const authUser = useAuth().user;
+  const live = !!authUser?.household; // 테스트 계정 — 가구 기록에 실제로 남는다
   const [tab, setTab] = useState("today");
-  const [kitOpen, setKitOpen] = useState(false);
+  const [healthEdit, setHealthEdit] = useState(false); // 고객 탭 건강 정보 수정
   const [calOpen, setCalOpen] = useState(false); // 오늘 탭 일정 달력
   const [calDay, setCalDay] = useState(null); // 달력에서 고른 날 — 시트로 뜬다
   const [calJob, setCalJob] = useState(null); // 시트에서 펼친 건 (고객 이름 → 디테일)
   const [callDone, setCallDone] = useState({}); // 확인전화 체크 (id-단계)
   const [opsMsgOpen, setOpsMsgOpen] = useState(false); // 관제에 알리기 시트
   // 동행 리포트 — 컨시어지가 직접 쓰는 칸 (시트 레포트 1·2번)
-  const [escortNote, setEscortNote] = useState("");
-  const [escortPhotos, setEscortPhotos] = useState([]);
-  const [escortRecorded, setEscortRecorded] = useState(false);
-  const [escortSaved, setEscortSaved] = useState(false);
+  // 저장하면 가구 기록(state.escort)에 남고, 그 뒤로는 저장한 값을 보여 준다 — 새로고침해도 남고 보호자 마이 '동행 리포트'로 간다 (2026-10-02).
+  // 전에는 저장 버튼이 없는 동작(visitPatch)을 보내서 아무 데도 남지 않았다.
+  const escort = state.escort || {};
+  const escortSaved = !!escort.savedAt;
+  const [escortDraft, setEscortNote] = useState("");
+  const [escortPhotoDraft, setEscortPhotos] = useState([]);
+  const [escortRecDraft, setEscortRecorded] = useState(false);
+  const escortNote = escortSaved ? escort.note || "" : escortDraft;
+  const escortPhotos = escortSaved ? Array.from({ length: escort.photos || 0 }, (_, i) => `동행사진_${i + 1}.jpg`) : escortPhotoDraft;
+  const escortRecorded = escortSaved ? !!escort.recorded : escortRecDraft;
   const [shopSel, setShopSel] = useState({});
-  const [shopCat, setShopCat] = useState("vitamin"); // 제안 탭 스토어 분류 (약국 분류는 삭제)
+  const [shopCat, setShopCat] = useState("safety"); // 제안 탭 스토어 분류 — 생활안전용품 하나 (lib/store.js)
   const [askProposed, setAskProposed] = useState({}); // 제안한 해주세요 항목
   const [shopSent, setShopSent] = useState(false);
   const [apptDone, setApptDone] = useState(false);
@@ -107,9 +123,29 @@ export default function ConciergePage() {
   const [apptTime, setApptTime] = useState("09:30");
   const [apptMemo, setApptMemo] = useState("");
   const [reqText, setReqText] = useState(""); // 컨시어지 요청 본문
+  // 제안 받을 사람 · 제안 일정 — 승인 대상은 컨시어지가 정한다 (2026-10-05). 내 일정에 맞춰 날짜를 제안한다.
+  const ME = LIVE_CONCIERGE;
+  const [propTo, setPropTo] = useState("guardian");
+  const [propDate, setPropDate] = useState(() => kstYmd(Date.now() + 3 * 86400000));
+  const [propTime, setPropTime] = useState("14:00");
+  const propLabel = propTo === "elder" ? "어르신" : "보호자";
+  const withProposal = (p) => {
+    const at = Date.now();
+    return {
+      ...p,
+      dir: "fromConcierge",
+      assignee: ME,
+      approver: propTo,
+      scheduledDate: propDate || null,
+      scheduledTime: propDate ? propTime : "",
+      status: "requested",
+      history: [{ at, status: "requested", note: `${p.history?.[0]?.note || "컨시어지 제안"} · ${propLabel} 수락 대기${propDate ? ` · 제안 일정 ${propDate} ${propTime}` : ""}` }],
+    };
+  };
   const [reqSent, setReqSent] = useState(false);
   const [pairCalled, setPairCalled] = useState(false);
-  const [sosAck, setSosAck] = useState(false); // 관제 급파 수락 원샷
+  // 관제 급파 수락 — 가구 기록(ops.sosAcceptedAt)에 남겨 관제 SOS 대응과 컨시어지 관리가 같은 시각을 본다 (2026-10-02)
+  const sosAck = !!state.ops.sosAcceptedAt;
   // 관제에 알리기 — 가구 기록(opsMessages)에 남겨 관제가 확인 · 답할 수 있게 (2026-10-02). 알림판에도 한 줄.
   const [opsMsgText, setOpsMsgText] = useState("");
   const opsMsgs = (state.opsMessages || []).filter((m) => m.role === "concierge");
@@ -124,7 +160,7 @@ export default function ConciergePage() {
   const sosTime = state.demo.sos && state.demo.sosAt
     ? new Date(state.demo.sosAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })
     : null;
-  const elderTel = telHref(liveCustomer(LIVE_ELDER, state.onboarding).phone);
+  const elderTel = telHref(liveCustomer(LIVE_ELDER, state.onboarding, state.health).phone);
   const rangFor = useRef("");
   useEffect(() => {
     if (!state.demo.sos) return;
@@ -141,15 +177,23 @@ export default function ConciergePage() {
   const [eapBooked, setEapBooked] = useState(false); // 심리상담 예약 — 감사 로그에 남기지 않는다
   const [prefAdded, setPrefAdded] = useState(false); // 선호 카드 — 오늘 기록 원샷
   const [detailDone, setDetailDone] = useState(false); // 오늘의 한 끗 완료
-  const [aiSent, setAiSent] = useState(false);
+  // 리포트를 냈는지 — 가구 기록(visit.reportSent)에서 본다. 화면 안에서만 기억하면 새로고침 뒤 같은 리포트를 또 보낸다.
+  const aiSent = !!state.visit.reportSent;
   const [pdfIssued, setPdfIssued] = useState(false);
   const [suggested, setSuggested] = useState({});
   const [earlyPay, setEarlyPay] = useState(false);
   // 거주 형태 토글 — 기본값은 가입 때 저장한 값 (DB: care_location_type · 실무자 피드백)
-  const [careLoc, setCareLoc] = useState(state.onboarding?.careLocation || "home");
+  // 현장에서 바꾸면 가구 기록(visit.loc)에 남겨 관제 방문관리 · 보호자 리포트가 같은 21항목을 본다 (2026-10-02 코드 점검)
+  const careLoc = state.visit.loc || state.onboarding?.careLocation || "home";
+  const setCareLoc = (k) => {
+    if (k !== careLoc) dispatch({ type: "visitLoc", loc: k });
+  };
   // 21항목 점검 · 항목 메모 · 총평 · 사진 수는 가구 기록(state.visit)에 둔다 — 관제 방문관리가 같은 값을 보고,
   // 새로고침해도 남는다 (2026-10-02). 메모는 쓰는 동안은 이 화면에만 두고, 칸을 벗어날 때 한 번 보낸다.
   const checkDone = state.visit.checks || {}; // 21항목 체크 — {"몸-혈압": {at}}
+  // 필수 점검 — 관제 방문관리와 같은 기준 (lib/ops-mgmt requiredFor). 빠지면 관제가 검수 승인을 못 한다
+  const doneNamesHere = new Set(Object.keys(checkDone).map((k) => k.slice(k.indexOf("-") + 1)));
+  const missingRequired = requiredFor(state.visit.loc || state.onboarding?.careLocation || "home").filter((k) => !doneNamesHere.has(k));
   const [openItem, setOpenItem] = useState(null); // 항목별 내용 입력 열림
   const [itemDraft, setItemDraft] = useState({}); // 쓰는 중인 항목 메모
   const itemNote = { ...(state.visit.notes || {}), ...itemDraft };
@@ -165,18 +209,43 @@ export default function ConciergePage() {
     if (summaryDraft !== (state.visit.memo || "")) dispatch({ type: "visitNote", text: summaryDraft });
     setSummaryDraft(null);
   };
+  // 쓰다 만 메모 · 총평 — 칸을 벗어나지 않고 탭을 바꾸거나 앱을 내려도 남게 (2026-10-02 코드 점검).
+  // 폰에서는 탭 전환 · 화면 끄기에 blur 가 오지 않아 쓰던 글이 사라졌다.
+  const draftsRef = useRef(null);
+  draftsRef.current = { itemDraft, summaryDraft, notes: state.visit.notes || {}, memo: state.visit.memo || "" };
+  const flushDrafts = useCallback(() => {
+    const d = draftsRef.current;
+    if (!d) return;
+    Object.keys(d.itemDraft).forEach((k) => {
+      if ((d.itemDraft[k] || "") !== (d.notes[k] || "")) dispatch({ type: "visitNote", key: k, text: d.itemDraft[k] });
+    });
+    if (d.summaryDraft != null && d.summaryDraft !== d.memo) dispatch({ type: "visitNote", text: d.summaryDraft });
+    if (Object.keys(d.itemDraft).length) setItemDraft({});
+    if (d.summaryDraft != null) setSummaryDraft(null);
+  }, [dispatch]);
+  useEffect(() => {
+    // 저장 계층이 화면을 내릴 때 모아 둔 것을 먼저 보낸 뒤에 넣는다 — 이 기기에 적혀 다음 저장 때 간다
+    const onHide = () => {
+      if (document.visibilityState === "hidden") setTimeout(flushDrafts, 0);
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, [flushDrafts]);
+  useEffect(() => {
+    flushDrafts();
+  }, [tab, flushDrafts]);
   const photos = Array.from({ length: state.visit.photos || 0 }, (_, i) => `현장사진_${i + 1}.jpg`); // 현장 사진 (데모 — 장수만)
   const [preview, setPreview] = useState(false); // 증빙 보고서 발행 전 미리보기
   const v = state.visit;
-  const videoConsent = state.onboarding ? !!state.onboarding.videoConsent : true; // 데모 기본 동의
+  // 데모 기본 동의 — 가입 상담(joinedAt)을 마친 가구만 그 답을 쓴다 (결제권한만 먼저 저장한 반쪽 onboarding 은 가입이 아니다)
+  const videoConsent = state.onboarding?.joinedAt ? !!state.onboarding.videoConsent : true;
 
   const purchasing = state.requests.filter(
     (r) => r.dir === "fromConcierge" && r.status === "inProgress"
-  );
-  // 어르신 화면에서 온 부탁 — 도와줘요(즉시 방문) · 해주세요 · 복지혜택 (2026-09-04 시트
-  // 어르신 해주세요 3번 "컨시어지 화면에도 처리 가능한 내용이 없음"). 종결된 것은 뺀다.
-  const elderAsks = state.requests.filter(
-    (r) => r.dir === "fromElder" && !["done", "cancelled", "rejected"].includes(r.status)
   );
   // 복지혜택 제안 — 담당 가구(김순자)에 맞는 것 (앱 전체 3번). 판정은 관제·보호자와 같은 값.
   const [welfareSent, setWelfareSent] = useState({});
@@ -200,6 +269,21 @@ export default function ConciergePage() {
   // 고객·보호자가 함께 쓰는 캘린더(배송·개인일정·가족이벤트 포함)는 고객 탭에서
   // 고객 이름을 눌러 상세로 본다.
   const cNow = new Date();
+  // 내가 승인 · 수락받아 확정된 해주세요도 달력에 (2026-10-05) — 데모 달력과 같은 모양으로
+  const reqJobs = (state.requests || [])
+    .filter((r) => r.scheduledDate && r.assignee === ME && ["confirmed", "inProgress", "cancelRequested"].includes(r.status))
+    .map((r) => ({
+      id: `rq-cal-${r.id}`,
+      off: daysUntil(r.scheduledDate),
+      kind: "request",
+      client: live ? LIVE_ELDER : ELDER.name,
+      age: ELDER.age,
+      time: r.scheduledTime || "시간 미정",
+      where: r.hospital || "",
+      detail: `해주세요 — ${r.type}`,
+      crew: `${ME} 1인`,
+      memo: r.detail || "",
+    }));
   const calMonthLabel = `${cNow.getFullYear()}년 ${cNow.getMonth() + 1}월`;
   const calCells = (() => {
     const first = new Date(cNow.getFullYear(), cNow.getMonth(), 1);
@@ -209,7 +293,8 @@ export default function ConciergePage() {
       cells.push({
         day: d,
         today: d === cNow.getDate(),
-        jobs: CONCIERGE_CAL.filter((j) => j.day === d),
+        // 오늘에서 며칠 떨어진 날인지(off)로 맞춘다 — 달력과 '오늘의 일정'이 같은 기준(이 폰의 오늘)을 쓰게
+        jobs: [...CONCIERGE_CAL.filter((j) => j.off === d - cNow.getDate()), ...reqJobs.filter((j) => j.off === d - cNow.getDate())],
       });
     }
     return cells;
@@ -218,7 +303,7 @@ export default function ConciergePage() {
 
   // ── 오늘 앞단 (2026-09-22 시안 1) ──
   // 오늘 일정은 달력과 같은 출처(CONCIERGE_CAL)를 쓴다 — 두 곳이 다른 말을 하지 않게.
-  const todayJobs = CONCIERGE_CAL.filter((j) => j.day === cNow.getDate() && j.start);
+  const todayJobs = CONCIERGE_CAL.filter((j) => j.off === 0 && j.start);
   const today = useToday(todayJobs, cNow);
   const [urgentOpen, setUrgentOpen] = useState(false);
   const [urgentSteps, setUrgentSteps] = useState({});
@@ -247,7 +332,11 @@ export default function ConciergePage() {
     () => (state.voices || []).filter((x) => x.to === "컨시어지").map((x) => ({ ...x, client: String(x.from || "").replace(/ 님$/, "") })),
     [state.voices]
   );
-  const mb = useMailbox(elderVoices);
+  const conciergeVoices = useMemo(
+    () => (state.voices || []).filter((x) => x.from === "컨시어지").map((x) => ({ ...x, client: String(x.to || "").replace(/ 님$/, "") })),
+    [state.voices]
+  );
+  const mb = useMailbox(elderVoices, conciergeVoices, live ? LIVE_ELDER : null);
   // 확인전화 — 아직 안 한 것 (시트 오늘 3번)
   const callsLeft = CALL_CHECKS.reduce(
     (n, c) => n + c.steps.filter((s) => !(callDone[`${c.id}-${s.k}`] ?? s.done)).length,
@@ -334,7 +423,7 @@ export default function ConciergePage() {
                 <button
                   onClick={() => {
                     if (sosAck) return;
-                    setSosAck(true);
+                    dispatch({ type: "sosAccept", by: "박지현" });
                     push("대응", "박지현 급파 수락 — 이동 시작 (도착 예정 6분)", "#FF8A80");
                   }}
                   disabled={sosAck}
@@ -351,6 +440,14 @@ export default function ConciergePage() {
                 {/* ── 앞단 재구성 (2026-09-22 시안 1) ──
                     출근해서 보는 순서: 인사 → 오늘 업무 요약 → 긴급확인 → 현재 진행 중 →
                     오늘의 일정 → 마무리 필요. 기존 카드(짝·컨디션·확인전화·부탁)는 그 아래로. */}
+                {/* 테스트 가구 — 무엇이 실제로 남고 무엇이 예시인지 맨 위에서 말한다 (2026-10-02 UX 점검) */}
+                {live && (
+                  <div role="note" className="rounded-xl border border-gold/40 bg-gold/[.08] px-3.5 py-3 text-[13px] leading-[1.65] text-ink">
+                    <b className="text-navy">테스트 가구 1 — 실제 고객은 김순자 님뿐입니다.</b> 체크인 · 방문 점검 · 리포트 · 동행 기록 ·
+                    관제에 알리기 · 김순자 님 마음사서함 · SOS 수락은 실제로 저장되어 다른 폰에 뜹니다. 다른 고객 · 긴급확인 · 오늘의 짝 · 외출
+                    컨디션은 예시입니다.
+                  </div>
+                )}
                 <TodayHeader
                   name="박지현"
                   now={cNow}
@@ -445,54 +542,12 @@ export default function ConciergePage() {
                 {/* 방문 업무흐름 — 관제와 같은 건을 본다 (2026-08-13 미팅 8단계) */}
                 <VisitFlow role="concierge" />
 
-                {/* 어르신이 부탁한 것 — 도와줘요 · 해주세요 · 복지혜택 (2026-09-04 시트).
-                    관제가 확인 전화를 마치면 '확인됨'으로 넘어오고, 여기서 진행·완료를 누른다.
-                    어르신 화면 '부탁해 둔 것'의 문구가 이 단계를 그대로 따라간다. */}
-                {elderAsks.length > 0 && (
-                  <Card className="p-4">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[15px] font-black text-navy">{ELDER.name} 님이 부탁한 것</span>
-                      <span className="ml-auto font-num text-[12px] font-bold text-amber">{elderAsks.length}건</span>
-                    </div>
-                    <div className="mt-3 space-y-2">
-                      {elderAsks.map((r) => {
-                        const st = STATUS[r.status];
-                        const next =
-                          r.status === "requested" ? ["확인함", "confirmed", "컨시어지 확인"]
-                          : r.status === "confirmed" ? ["진행 시작", "inProgress", "컨시어지 진행 시작"]
-                          : r.status === "inProgress" ? ["완료", "done", "컨시어지 완료 처리"]
-                          : null;
-                        return (
-                          <div key={r.id} className="rounded-xl border border-navy/[.07] bg-white/60 p-3">
-                            <div className="flex items-center gap-2">
-                              <Badge fg={st.fg} bg={st.bg}>{st.label}</Badge>
-                              {r.urgency === "urgent" && <Badge fg="#C0392B" bg="rgba(192,57,43,.1)">긴급</Badge>}
-                              <span className="ml-auto font-num text-[11px] text-muted">{fmtT(r.history[0]?.at || Date.now())}</span>
-                            </div>
-                            <div className="mt-1.5 text-[14px] font-bold text-navy">{r.type}</div>
-                            <div className="mt-0.5 text-[12px] leading-[1.6] text-muted">{r.detail}</div>
-                            {r.status === "requested" && (
-                              <p className="mt-1.5 text-[11.5px] font-bold text-amber">관제 확인 전화 대기 — 관제 대시보드 &lsquo;지금 처리할 일&rsquo;</p>
-                            )}
-                            {next && (
-                              <button
-                                onClick={() => {
-                                  dispatch({ type: "transitionRequest", id: r.id, to: next[1], note: next[2] });
-                                  push("어르신", `${ELDER.name} ${r.type} — ${next[2]}`, "#8FE3C0");
-                                }}
-                                className={`btn-press mt-2.5 w-full rounded-xl border py-2.5 text-[13px] font-bold ${
-                                  next[1] === "done" ? "border-green/40 text-green" : "border-navy/20 text-navy"
-                                }`}
-                              >
-                                {next[0]}
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </Card>
-                )}
+                {/* 도와줘요(즉시 방문 요청) — 관제가 확인 전화 · 출동 지시를 하고, 그 단계가 여기 그대로 뜬다 (2026-10-05) */}
+                <HelpCallCard role="concierge" me={ME} />
+
+                {/* 해주세요 — 보호자 · 어르신 부탁은 내 일정을 보고 승인 · 거절, 확정 건 진행 · 완료, 보낸 제안 (2026-10-05).
+                    전에는 어르신 부탁만 보였고, 관제 확인 전에 '확인함'을 누를 수 있었다. */}
+                <ConciergeRequests requests={state.requests} payments={state.payments} me={ME} dispatch={dispatch} push={push} />
 
 
                 {state.demo.offline && (
@@ -514,8 +569,9 @@ export default function ConciergePage() {
                 <Card className="p-[18px]">
                   <div className="flex items-center justify-between">
                     <span className="text-[15px] font-black text-navy">동행 준비</span>
+                    {/* 두 사람 모두 체크인해야 수행중 — 나만 체크인했으면 '짝 체크인 대기' (2026-10-02 QA 13번) */}
                     <Badge fg="#FFFFFF" bg="#0A1F3C">
-                      {v.checkedIn ? "수행중" : "예정"}
+                      {v.checkedIn && pairCalled ? "수행중" : v.checkedIn ? "짝 체크인 대기" : "예정"}
                     </Badge>
                   </div>
                   <div className="mt-1 text-[12.5px] leading-[1.6] text-muted">
@@ -638,7 +694,8 @@ export default function ConciergePage() {
                         patch: { checkedIn: true },
                         event: { kind: "gps", label: "출근 체크인 · GPS 좌표 기록" },
                       });
-                      push("체크인", "박지현 · 김순자(78) 동행 수행중 전환", "#4ADE80");
+                      // '수행중'은 두 사람 모두 체크인해야 시작이다 — 혼자 체크인한 것을 수행중이라고 적지 않는다 (2026-10-02 QA)
+                      push("체크인", live ? "박지현 출근 체크인 · 김순자(78) 댁 (GPS 기록)" : "박지현 출근 체크인 · 김순자(78) — 짝(서다인) 체크인 대기", "#4ADE80");
                     }}
                     disabled={v.checkedIn}
                     className={`btn-press btn-dark mt-4 w-full rounded-xl py-3.5 text-[17px] font-bold text-white ${
@@ -821,6 +878,38 @@ export default function ConciergePage() {
                 )}
 
 
+                {/* 건강 정보 — 복용약 · 질환 · 알레르기 (2026-10-02 QA "복용약 등록·수정 버튼 없음").
+                    첫 안심방문 때 약봉투를 보고 여기서 고친다. 어르신 복약 미션 · 보호자 마이 · 관제 · SOS 신고 정보가 같은 값을 쓴다. */}
+                <Card className="p-[18px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[17px] font-black text-navy">김순자님 건강 정보</span>
+                    {!healthEdit && (
+                      <button
+                        onClick={() => setHealthEdit(true)}
+                        className="btn-press min-h-[36px] rounded-lg border border-navy/15 px-3 text-[12.5px] font-bold text-navy"
+                      >
+                        복용약 · 질환 수정
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-2.5">
+                    {healthEdit ? (
+                      <HealthEditor
+                        health={healthOf(state)}
+                        onCancel={() => setHealthEdit(false)}
+                        onSave={(payload) => {
+                          const by = live ? `${authUser?.name || "컨시어지"} (컨시어지)` : "박지현 (컨시어지)";
+                          dispatch({ type: "setHealth", payload, by });
+                          push("건강", `건강 정보 수정 — 복용 ${payload.meds.length}번 · 질환 ${payload.conditions.length}가지 · ${by}`, "#8FA9CC");
+                          setHealthEdit(false);
+                        }}
+                      />
+                    ) : (
+                      <HealthSummary health={healthOf(state)} compact />
+                    )}
+                  </div>
+                </Card>
+
                 {/* 선호 카드 + AI 동행 브리핑 — 방문 전 30초 (2026-08-12 대표 피드백으로 합침) */}
                 <Card className="p-[18px]">
                   <div className="flex items-center justify-between">
@@ -906,8 +995,11 @@ export default function ConciergePage() {
               <Mailbox
                 mb={mb}
                 onEvent={push}
+                onToOps={(name, memo) => sendOpsMsg(`마음사서함 — ${name} 고객 음성 확인 요청${memo ? ` · 청취 메모: ${memo}` : ""}`)}
                 onSent={(name, payload) => {
                   // 정상 발송이 확인된 것만 고객 화면으로 간다 — 어르신 마음사서함 말풍선이 된다.
+                  // 테스트 가구에는 김순자 님만 실제 고객이다 — 예시 고객에게 보낸 것은 가구 기록에 남기지 않는다 (2026-10-02 코드 점검)
+                  if (live && name !== LIVE_ELDER) return;
                   dispatch({
                     type: "addVoice",
                     payload: {
@@ -931,17 +1023,15 @@ export default function ConciergePage() {
                 <Card className="p-4">
                   {/* 관찰 리포트 버튼은 뺐다 (2026-08-21 시트 컨시어지 전체 2번).
                       리포트 작성은 아래 '리포트' 구역 한 곳에서만 한다 — 같은 일을
-                      두 자리에서 시작할 수 있으면 어디까지 썼는지 알 수 없다. */}
-                  <div className="grid grid-cols-1 gap-2">
-                    <StepBtn
-                      done={v.kitDone}
-                      disabled={!v.checkedIn}
-                      label={v.kitDone ? "케어박스 완료" : "케어박스 점검"}
-                      onClick={() => v.checkedIn && !v.kitDone && setKitOpen(true)}
-                    />
-                  </div>
+                      두 자리에서 시작할 수 있으면 어디까지 썼는지 알 수 없다.
+                      케어박스 점검 버튼도 뺐다 — 케어박스는 제공하지 않는다 (2026-10-02 운영 결정). */}
+                  {v.audit.length === 0 && (
+                    <p className="text-[13px] leading-[1.7] text-muted">
+                      체크인하면 GPS · 시간 · 점검 · 사진 · 리포트가 여기 하나의 방문 기록으로 묶입니다.
+                    </p>
+                  )}
                   {v.audit.length > 0 && (
-                    <div className="mt-4 border-t border-navy/10 pt-3">
+                    <div>
                       <SectionLabel>방문 기록 (자동 연결)</SectionLabel>
                       <div className="mt-2 space-y-1.5">
                         {v.audit.map((e, i) => (
@@ -1219,6 +1309,7 @@ export default function ConciergePage() {
                               const key = `${ax.axis}-${i.k}`;
                               const on = !!checkDone[key];
                               const open = openItem === key;
+                              const grade = (state.visit.grades || {})[key] || "";
                               return (
                                 <div key={key}>
                                   <div className="flex items-center gap-1.5">
@@ -1238,9 +1329,40 @@ export default function ConciergePage() {
                                         itemNote[key] ? "text-ink" : "text-muted/70"
                                       }`}
                                     >
-                                      {itemNote[key] || "내용 적기"}
+                                      {grade && (
+                                        <span
+                                          className="mr-1.5 rounded-full px-1.5 py-[1px] text-[10.5px] font-bold"
+                                          style={{ background: RESULT_TONE[grade]?.bg, color: RESULT_TONE[grade]?.fg }}
+                                        >
+                                          {grade}
+                                        </span>
+                                      )}
+                                      {itemNote[key] || (grade ? "" : "내용 적기")}
                                     </button>
                                   </div>
+                                  {/* 상태 — 컨시어지가 고른 것만 리포트에 간다 (2026-10-02). 고르지 않아도 된다 */}
+                                  {open && (
+                                    <div className="animate-tickIn mt-1.5 flex flex-wrap items-center gap-1.5" role="group" aria-label={`${i.k} 상태`}>
+                                      <span className="text-[11px] font-bold text-muted">상태 (선택)</span>
+                                      {VISIT_GRADES.map((g) => (
+                                        <button
+                                          key={g}
+                                          type="button"
+                                          aria-pressed={grade === g}
+                                          onMouseDown={(e) => e.preventDefault()}
+                                          onClick={() => dispatch({ type: "visitGrade", key, grade: grade === g ? "" : g })}
+                                          className="btn-press btn-inline btn-chip rounded-full border px-3 py-1.5 text-[12px] font-bold"
+                                          style={
+                                            grade === g
+                                              ? { background: RESULT_TONE[g].bg, color: RESULT_TONE[g].fg, borderColor: RESULT_TONE[g].dot }
+                                              : { borderColor: "rgba(10,31,60,.15)", color: "#5C5A54" }
+                                          }
+                                        >
+                                          {g}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
                                   {open && (
                                     <textarea
                                       autoFocus
@@ -1304,7 +1426,7 @@ export default function ConciergePage() {
                       A4 인쇄본
                     </Link>
                     <span className="chip-gold rounded-full px-2.5 py-1 text-[11px] font-bold">
-                      AI 초안 · 음성 기록 기반
+                      {live ? "AI 초안 예시 · 음성 기록 연동 전" : "AI 초안 · 음성 기록 기반"}
                     </span>
                   </div>
                   <div
@@ -1326,16 +1448,20 @@ export default function ConciergePage() {
                   <div className="mt-3.5 rounded-xl border border-navy/12 p-3.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <SectionLabel>동행 기록 — 직접 작성</SectionLabel>
-                      <button
-                        onClick={() => setEscortNote(AI_REPORT.draft)}
-                        className="btn-press btn-inline btn-chip ml-auto rounded-lg border border-navy/20 px-2.5 py-1.5 text-[11.5px] font-bold text-navy"
-                      >
-                        AI 초안 불러오기
-                      </button>
+                      {/* 테스트 가구에서는 예시 초안을 불러오지 않는다 — 그대로 보내면 지어낸 동행이 보호자에게 실제 기록으로 간다 */}
+                      {!live && !escortSaved && (
+                        <button
+                          onClick={() => setEscortNote(AI_REPORT.draft)}
+                          className="btn-press btn-inline btn-chip ml-auto rounded-lg border border-navy/20 px-2.5 py-1.5 text-[11.5px] font-bold text-navy"
+                        >
+                          AI 초안 불러오기
+                        </button>
+                      )}
                     </div>
                     <textarea
                       rows={4}
                       value={escortNote}
+                      readOnly={escortSaved}
                       onChange={(e) => setEscortNote(e.target.value)}
                       placeholder="접수·진료·수납에서 있었던 일, 의료진이 하신 말씀 그대로, 다음 진료까지 챙길 것을 적습니다. 판단·진단은 적지 않습니다."
                       className="mt-2 w-full resize-none rounded-lg border border-navy/15 px-3 py-2.5 text-[13.5px] leading-[1.7] outline-none focus:border-gold"
@@ -1352,6 +1478,7 @@ export default function ConciergePage() {
                       ))}
                       <button
                         onClick={() => setEscortPhotos((v) => [...v, `동행사진_${v.length + 1}.jpg`])}
+                        disabled={escortSaved}
                         className="btn-press btn-inline btn-chip rounded-lg border border-navy/20 px-2.5 py-1.5 text-[11.5px] font-bold text-navy"
                       >
                         + 사진 첨부 (데모)
@@ -1359,6 +1486,7 @@ export default function ConciergePage() {
                     </div>
                     <button
                       onClick={() => setEscortRecorded((v) => !v)}
+                      disabled={escortSaved}
                       aria-pressed={escortRecorded}
                       className={`btn-press mt-2.5 flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-[12.5px] font-bold ${
                         escortRecorded ? "border-green/30 bg-green/10 text-green" : "border-navy/20 text-navy"
@@ -1383,14 +1511,9 @@ export default function ConciergePage() {
                     <button
                       onClick={() => {
                         if (!escortNote.trim() || escortSaved) return;
-                        setEscortSaved(true);
                         dispatch({
-                          type: "visitPatch",
-                          patch: {},
-                          event: {
-                            kind: "report",
-                            label: `동행 기록 저장 · 사진 ${escortPhotos.length}장${escortRecorded ? " · 영상 있음" : ""}`,
-                          },
+                          type: "escortSave",
+                          payload: { note: escortNote.trim(), photos: escortPhotos.length, recorded: escortRecorded, by: "박지현" },
                         });
                         push(
                           "리포트",
@@ -1430,15 +1553,22 @@ export default function ConciergePage() {
                         <div className="mt-2 space-y-1">
                           {checkupFor(careLoc).flatMap((ax) =>
                             ax.items
-                              .filter((i) => itemNote[`${ax.axis}-${i.k}`])
-                              .map((i) => (
-                                <div key={`${ax.axis}-${i.k}`} className="flex gap-2 text-[12px] leading-[1.6]">
-                                  <span className="w-[74px] shrink-0 font-bold text-muted">{i.k}</span>
-                                  <span className="min-w-0 flex-1 text-ink">{itemNote[`${ax.axis}-${i.k}`]}</span>
-                                </div>
-                              ))
+                              .filter((i) => itemNote[`${ax.axis}-${i.k}`] || (state.visit.grades || {})[`${ax.axis}-${i.k}`])
+                              .map((i) => {
+                                const g = (state.visit.grades || {})[`${ax.axis}-${i.k}`];
+                                return (
+                                  <div key={`${ax.axis}-${i.k}`} className="flex gap-2 text-[12px] leading-[1.6]">
+                                    <span className="w-[74px] shrink-0 font-bold text-muted">{i.k}</span>
+                                    <span className="min-w-0 flex-1 text-ink">
+                                      {g && <b style={{ color: RESULT_TONE[g]?.fg }}>{g}</b>}
+                                      {g && itemNote[`${ax.axis}-${i.k}`] ? " · " : ""}
+                                      {itemNote[`${ax.axis}-${i.k}`]}
+                                    </span>
+                                  </div>
+                                );
+                              })
                           )}
-                          {Object.keys(itemNote).filter((k) => itemNote[k]).length === 0 && (
+                          {Object.keys(itemNote).filter((k) => itemNote[k]).length === 0 && Object.keys(state.visit.grades || {}).length === 0 && (
                             <div className="text-[12px] text-muted">아직 적은 항목이 없습니다.</div>
                           )}
                         </div>
@@ -1478,27 +1608,28 @@ export default function ConciergePage() {
                   <button
                     onClick={() => {
                       if (aiSent) return;
-                      setAiSent(true);
+                      // 테스트 가구에서는 컨시어지가 실제로 적은 것(동행 기록 → 총평)만 싣는다 — 예시 초안을 실제 기록처럼 보내지 않는다
+                      const note = escortSaved ? escort.note : live ? state.visit.memo || "" : AI_REPORT.draft;
                       dispatch({
                         type: "addReport",
-                        payload: {
-                          id: `rp-${Date.now()}`,
-                          by: "박지현",
-                          flagged: 0,
-                          note: AI_REPORT.draft,
-                          secretNote: "",
-                          shared: true,
-                        },
+                        payload: { id: `rp-${Date.now()}`, by: "박지현", flagged: 0, note, secretNote: "", shared: true, closesVisit: true },
                       });
-                      push("리포트", "동행 리포트 검수 확정 · 가족 앱 전달", "#8FA9CC");
+                      // 가족에게 가는 것은 관제가 검수하고 '보호자 리포트 발송'을 누를 때다 — 동행 기록도 그때 같이 간다.
+                      // 전에는 이 버튼을 누르자마자 '가족에게 전달됨'이라고 했지만 실제로는 관제 검수 대기였다 (2026-10-02 QA)
+                      push("리포트", escortSaved ? "방문 · 동행 리포트 제출 — 관제 검수 대기" : "방문 리포트 제출 — 관제 검수 대기", "#8FA9CC");
                     }}
                     disabled={aiSent}
                     className={`btn-press btn-dark mt-2 w-full rounded-xl py-3.5 text-[16px] font-bold text-white ${
                       aiSent ? "bg-muted" : "bg-green"
                     } disabled:opacity-50`}
                   >
-                    {aiSent ? "✓ 가족에게 전달됨" : "검수 확정 후 가족에게 전달"}
+                    {aiSent ? (state.visit.ops?.sentAt ? "✓ 관제 검수 · 가족에게 발송됨" : "✓ 제출됨 — 관제 검수 대기") : "리포트 제출 (관제 검수 후 가족에게)"}
                   </button>
+                  {!aiSent && missingRequired.length > 0 && (
+                    <p className="mt-1.5 text-[12px] leading-[1.6] text-[#8A5D12]">
+                      필수 점검 {missingRequired.length}개가 남았습니다 ({missingRequired.join(" · ")}) — 관제 검수 승인이 막힙니다.
+                    </p>
+                  )}
                 </Card>
 
                 {/* 리포트 누적 — 본인 전체 · 타인 공유분만 */}
@@ -1549,6 +1680,38 @@ export default function ConciergePage() {
             {/* ════ 제안 탭 ════ */}
             {tab === "suggest" && (
               <>
+                {/* 제안 받을 사람 · 제안 일정 — 아래 모든 제안에 같이 붙는다 (2026-10-05 "승인대상자는 컨시어지가 정한다") */}
+                <Card className="p-4">
+                  <div className="text-[15px] font-black text-navy">제안 보내기 설정</div>
+                  <p className="mt-0.5 text-[11.5px] leading-[1.6] text-muted">누가 수락할지, 언제 해 드릴지 정하고 아래에서 제안하세요. 수락되면 확정됩니다 (금액이 있으면 보호자 결제 뒤).</p>
+                  <div className="mt-2.5 flex gap-1.5" role="radiogroup" aria-label="수락할 분">
+                    {[["guardian", "보호자"], ["elder", "어르신"]].map(([k, l]) => (
+                      <button
+                        key={k}
+                        role="radio"
+                        aria-checked={propTo === k}
+                        onClick={() => setPropTo(k)}
+                        className={`btn-press flex-1 rounded-xl border py-2.5 text-[13px] font-bold ${propTo === k ? "border-navy bg-navy text-white" : "border-navy/15 text-muted"}`}
+                      >
+                        {l}이 수락
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <label className="block text-[11px] font-bold text-muted">
+                      제안 날짜
+                      <input type="date" value={propDate} min={kstYmd(Date.now())} onChange={(e) => setPropDate(e.target.value)} className="mt-1 w-full rounded-lg border border-navy/15 px-2.5 py-2 text-[14px] text-ink outline-none focus:border-gold" />
+                    </label>
+                    <label className="block text-[11px] font-bold text-muted">
+                      시간
+                      <input type="time" value={propTime} onChange={(e) => setPropTime(e.target.value)} className="mt-1 w-full rounded-lg border border-navy/15 px-2.5 py-2 text-[14px] text-ink outline-none focus:border-gold" />
+                    </label>
+                  </div>
+                  {propTo === "elder" && (
+                    <p className="mt-2 text-[11.5px] leading-[1.6] text-amber">어르신 하루 한도를 넘는 금액은 어르신이 수락한 뒤 보호자가 결제합니다.</p>
+                  )}
+                </Card>
+
                 {/* 케어 제안 — 제안은 반드시 근거(trigger)를 동반 (도메인 규칙 1.1) */}
                 <SectionLabel>케어 제안</SectionLabel>
                 {CARE_SUGGESTIONS.map((sg) => (
@@ -1564,11 +1727,10 @@ export default function ConciergePage() {
                         setSuggested((x) => ({ ...x, [sg.item]: true }));
                         dispatch({
                           type: "addRequest",
-                          payload: {
+                          payload: withProposal({
                             id: `rq-${Date.now()}`,
-                            dir: "fromConcierge",
                             type: `케어 제안 · ${sg.item}`,
-                            detail: `${sg.trigger}. 필요하시면 구매대행으로 진행합니다.`,
+                            detail: `${sg.trigger}. 필요하시면 결제 후 다음 방문 때 가져다 드립니다 (배송비 무료).`,
                             amount: sg.est,
                             preferredDate: null,
                             urgency: "normal",
@@ -1577,9 +1739,9 @@ export default function ConciergePage() {
                             status: "requested",
                             history: [{ at: Date.now(), status: "requested", note: "관찰 근거 기반 제안" }],
                             proof: null,
-                          },
+                          }),
                         });
-                        push("제안", `케어 제안 전송 · ${sg.item} (근거 동반)`, "#B08D57");
+                        push("제안", `케어 제안 전송 · ${sg.item} (근거 동반) — ${propLabel} 수락 대기`, "#B08D57");
                       }}
                       disabled={!!suggested[sg.item]}
                       className={`btn-press mt-2.5 w-full rounded-xl border py-2.5 text-[13px] font-bold ${
@@ -1603,9 +1765,10 @@ export default function ConciergePage() {
                 <SectionLabel>복지혜택 제안 — {ELDER.name} 님 댁</SectionLabel>
                 <Card className="p-4">
                   <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <span className="text-[14px] font-bold text-navy">자동 매칭 {welfareN.high + welfareN.check}건</span>
+                    {/* 47 이 어디서 왔는지 같이 적는다 — 판정 79건 중 '낮음'을 뺀 것 (2026-10-02 QA "47 vs 79") */}
+                    <span className="text-[14px] font-bold text-navy">제안할 것 {welfareN.high + welfareN.check}건</span>
                     <span className="font-num text-[12px] text-muted">
-                      높음 {welfareN.high} · 추가확인 {welfareN.check} · 낮음 {welfareN.low}
+                      판정 {welfareN.high + welfareN.check + welfareN.low}건 중 높음 {welfareN.high} + 추가확인 {welfareN.check} (낮음 {welfareN.low}건 제외)
                     </span>
                   </div>
                   <p className="mt-1 text-[12px] leading-[1.6] text-muted">
@@ -1622,9 +1785,8 @@ export default function ConciergePage() {
                         setWelfareSent((s) => ({ ...s, [m.policy.id]: true }));
                         dispatch({
                           type: "addRequest",
-                          payload: {
+                          payload: withProposal({
                             id: `rq-${Date.now()}`,
-                            dir: "fromConcierge",
                             type: `복지혜택 제안 · ${m.policy.name}`,
                             detail: `${m.policy.summary} — ${m.policy.value}. ${m.verdict} · 확인할 것: ${m.checks}. 신청: ${m.policy.apply}`,
                             amount: 0,
@@ -1635,22 +1797,22 @@ export default function ConciergePage() {
                             status: "requested",
                             history: [{ at: Date.now(), status: "requested", note: "컨시어지 현장 제안 · 공공지원 우선" }],
                             proof: null,
-                          },
+                          }),
                         });
                         dispatch({ type: "welfareStatus", id: m.policy.id, status: "자격확인", by: "컨시어지" });
                         push("복지", `복지혜택 제안 — ${m.policy.name} (${m.verdict})`, "#F0D9A8");
                       }}
-                      sendLabel="보호자에게 제안"
+                      sendLabel={`${propLabel}에게 제안`}
                       sent={welfareSent}
                     />
                   </div>
                 </Card>
 
-                {/* 구매대행 쇼핑 — 스토어 전 품목 (2026-08-21 시트 컨시어지 제안 1번).
-                    전에는 여섯 개만 하드코딩돼 있어서 "이건 없네"가 나왔다.
-                    보호자·어르신 스토어와 같은 카탈로그(lib/store.js)를 그대로 쓴다. */}
-                <SectionLabel>구매대행 쇼핑 — 스토어 전 품목</SectionLabel>
+                {/* 안전용품 제안 — 보호자·어르신 스토어와 같은 카탈로그(lib/store.js)를 그대로 쓴다.
+                    스토어는 생활안전용품만 판다 (2026-10-02 운영 결정). 분류가 하나면 고르는 줄을 감춘다. */}
+                <SectionLabel>안전용품 제안 — 스토어 전 품목</SectionLabel>
                 <Card className="p-4">
+                  {STORE_CATALOG.length > 1 && (
                   <div className="relative -mx-1">
                     <div className="flex gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none]">
                       {STORE_CATALOG.map((c) => {
@@ -1675,7 +1837,8 @@ export default function ConciergePage() {
                       style={{ background: "linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.95))" }}
                     />
                   </div>
-                  <div className="mt-3 space-y-3">
+                  )}
+                  <div className={`${STORE_CATALOG.length > 1 ? "mt-3" : ""} space-y-3`}>
                     {(STORE_CATALOG.find((c) => c.id === shopCat) || STORE_CATALOG[0]).groups.map((g) => (
                       <div key={g.name}>
                         <div className="text-[12px] font-bold text-muted">{g.name}</div>
@@ -1716,14 +1879,14 @@ export default function ConciergePage() {
                     if (shopSent) {
                       return (
                         <p className="mt-3 rounded-xl border border-green/25 bg-green/5 p-3 text-[13px] font-bold text-green">
-                          보호자 승인 요청 전송됨 — 승인되면 구매 후 완료사진을 올립니다.
+                          {propLabel}에게 제안을 보냈습니다 — 수락 · 결제되면 확정되고, 오늘 탭 &lsquo;확정된 것&rsquo;에서 진행합니다.
                         </p>
                       );
                     }
                     if (items.length === 0) {
                       return (
                         <p className="mt-3 text-[12px] text-muted">
-                          물품을 담으면 예상금액과 함께 보호자 승인 요청이 전송됩니다.
+                          물품을 담으면 예상금액과 함께 {propLabel}에게 제안이 갑니다.
                         </p>
                       );
                     }
@@ -1733,34 +1896,28 @@ export default function ConciergePage() {
                           setShopSent(true);
                           dispatch({
                             type: "addRequest",
-                            payload: {
+                            payload: withProposal({
                               id: `rq-${Date.now()}`,
-                              dir: "fromConcierge",
-                              type: "결제가 필요합니다",
-                              detail: `구매대행: ${items.map((i) => i.name).join(", ")} — 마트 구매 후 다음 방문 때 전달합니다.`,
+                              type: "안전용품 제안",
+                              detail: `안전용품: ${items.map((i) => i.name).join(", ")} — 결제가 끝나면 다음 방문 때 가져다 드립니다 (배송비 무료).`,
                               amount: est,
                               preferredDate: null,
                               urgency: "normal",
                               assignee: "박지현",
                               photos: [],
-                              status: "awaitingPayment",
-                              history: [
-                                { at: Date.now(), status: "requested", note: "구매대행 쇼핑 등록" },
-                                { at: Date.now(), status: "confirmed", note: "" },
-                                { at: Date.now(), status: "awaitingPayment", note: `예상 금액 ${fmtWon(est)}` },
-                              ],
+                              history: [{ at: Date.now(), status: "requested", note: `안전용품 제안 · 예상 금액 ${fmtWon(est)}` }],
                               proof: null,
-                            },
+                            }),
                           });
                           dispatch({
                             type: "audit",
-                            event: { kind: "request", label: `구매대행 승인 요청 · ${items.length}개 품목` },
+                            event: { kind: "request", label: `안전용품 결제 승인 요청 · ${items.length}개 품목` },
                           });
-                          push("구매대행", `구매대행 ${items.length}건 승인 요청 · 예상 ${fmtWon(est)}`, "#B08D57");
+                          push("구매", `안전용품 ${items.length}건 제안 · ${fmtWon(est)} — ${propLabel} 수락 대기`, "#B08D57");
                         }}
                         className="btn-press btn-dark mt-3 w-full rounded-xl bg-navy py-3 text-[15px] font-bold text-white"
                       >
-                        보호자 승인 요청 · 예상 {fmtWon(est)}
+                        {propLabel}에게 제안 · 예상 {fmtWon(est)}
                       </button>
                     );
                   })()}
@@ -1809,9 +1966,8 @@ export default function ConciergePage() {
                             setAskProposed((s) => ({ ...s, [m.no]: true }));
                             dispatch({
                               type: "addRequest",
-                              payload: {
+                              payload: withProposal({
                                 id: `rq-${Date.now()}`,
-                                dir: "fromConcierge",
                                 type: m.name,
                                 detail: `컨시어지 제안 — ${m.scope}`,
                                 amount: m.amount ?? null,
@@ -1824,9 +1980,9 @@ export default function ConciergePage() {
                                   { at: Date.now(), status: "requested", note: "컨시어지 현장 제안" },
                                 ],
                                 proof: null,
-                              },
+                              }),
                             });
-                            push("제안", `${m.name} 제안 — 보호자 확인 대기`, "#B08D57");
+                            push("제안", `${m.name} 제안 — ${propLabel} 수락 대기`, "#B08D57");
                           }}
                           className={`btn-press flex w-full items-center gap-2.5 rounded-xl border p-2.5 text-left disabled:opacity-60 ${
                             on ? "border-green/30 bg-green/5" : "border-navy/12"
@@ -1846,7 +2002,7 @@ export default function ConciergePage() {
                     })}
                   </div>
                   <p className="mt-3 border-t border-navy/[.08] pt-2.5 text-[11px] leading-[1.7] text-muted">
-                    제안은 보호자 확인을 거쳐야 진행됩니다. 판매 실적은 평가에 넣지 않습니다 (원칙 1).
+                    제안은 위에서 고른 분({propLabel})이 수락해야 진행됩니다. 판매 실적은 평가에 넣지 않습니다 (원칙 1).
                   </p>
                 </Card>
 
@@ -1868,9 +2024,8 @@ export default function ConciergePage() {
                     onClick={() => {
                       dispatch({
                         type: "addRequest",
-                        payload: {
+                        payload: withProposal({
                           id: `rq-${Date.now()}`,
-                          dir: "fromConcierge",
                           type: "컨시어지 요청",
                           detail: reqText.trim(),
                           amount: null,
@@ -1881,14 +2036,14 @@ export default function ConciergePage() {
                           status: "requested",
                           history: [{ at: Date.now(), status: "requested", note: "컨시어지 현장 등록" }],
                           proof: null,
-                        },
+                        }),
                       });
                       dispatch({ type: "audit", event: { kind: "request", label: "컨시어지 요청 등록" } });
                       setReqSent(true);
                     }}
                     className="btn-press mt-2.5 w-full rounded-xl bg-navy py-3 text-[15px] font-bold text-white disabled:opacity-40"
                   >
-                    {reqSent ? "✓ 보호자에게 전달됨" : "보호자에게 요청 보내기"}
+                    {reqSent ? `✓ ${propLabel}에게 전달됨` : `${propLabel}에게 요청 보내기`}
                   </button>
                   <p className="mt-3 text-[11px] leading-[1.6] text-muted">
                     등록한 요청은 보호자 홈에 &lsquo;컨시어지 요청&rsquo;으로 뜨고, 상태가 함께
@@ -2405,79 +2560,12 @@ export default function ConciergePage() {
               )}
             </Sheet>
           )}
-
-          {kitOpen && (
-            <KitSheet
-              items={state.kit}
-              onboarding={state.onboarding}
-              onClose={() => setKitOpen(false)}
-              onDone={({ items, refill, estAmount }) => {
-                dispatch({ type: "kitUpdate", items });
-                dispatch({
-                  type: "audit",
-                  patch: { kitDone: true },
-                  event: { kind: "photo", label: "케어박스 점검 · 전체사진 촬영" },
-                });
-                if (refill.length > 0) {
-                  dispatch({
-                    type: "addRequest",
-                    payload: {
-                      id: `rq-${Date.now()}`,
-                      dir: "fromConcierge",
-                      type: "약이 부족합니다",
-                      detail: `보충 필요: ${refill.join(", ")}. 다음 방문 때 보충해 드립니다.`,
-                      amount: estAmount,
-                      preferredDate: null,
-                      urgency: "normal",
-                      assignee: "박지현",
-                      photos: ["kit-check.jpg"],
-                      status: "awaitingPayment",
-                      history: [
-                        { at: Date.now(), status: "requested", note: "케어박스 점검 중 확인" },
-                        { at: Date.now(), status: "confirmed", note: "" },
-                        { at: Date.now(), status: "awaitingPayment", note: `예상 금액 ${fmtWon(estAmount)}` },
-                      ],
-                      proof: null,
-                    },
-                  });
-                  dispatch({
-                    type: "audit",
-                    event: { kind: "request", label: `보충 승인 요청 · ${refill.length}개 품목` },
-                  });
-                }
-                setKitOpen(false);
-              }}
-            />
-          )}
-
         </div>
       </div>
     </>
   );
 }
 
-function StepBtn({ done, disabled, label, onClick }) {
-  // 활성 배경 주홍색 — 수행 단계 버튼 강조 (요청 반영)
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`btn-press min-h-[64px] rounded-xl border p-2 text-[13px] font-bold leading-[1.4] ${
-        done
-          ? "border-green/30 bg-green/10 text-green"
-          : disabled
-          ? "border-navy/10 text-muted/40"
-          : "btn-dark border-[#D9542B] bg-[#D9542B] text-white"
-      }`}
-    >
-      {done ? "✓ " : ""}
-      {label}
-    </button>
-  );
-}
-
-// 케어박스 점검 시트 — REQ-10
-// 의약품(isMedicine)은 수량 확인만. 보충은 보호자 승인 → 구매대행.
 // 공통 바텀시트 — 이 화면의 시트들이 같은 껍데기를 쓰도록 뽑아 두었다.
 // 닫기 버튼은 제목 줄 오른쪽에 둔다 (시트가 길어지면 아래 버튼까지 못 내려간다).
 function Sheet({ title, onClose, children }) {
@@ -2500,120 +2588,6 @@ function Sheet({ title, onClose, children }) {
   );
 }
 
-function KitSheet({ items, _onboarding, onClose, onDone }) {
-  const [rows, setRows] = useState(items);
-  const [photoTaken, setPhotoTaken] = useState(false);
-  const [newKitPhoto, setNewKitPhoto] = useState(false); // 새 키트 전달사진 (회의 7.3)
-
-  const refill = useMemo(() => rows.filter((r) => r.low).map((r) => r.name), [rows]);
-  const estAmount = refill.length * 9000; // 데모용 추정 단가
-
-  const setQty = (i, d) =>
-    setRows((rs) =>
-      rs.map((r, j) =>
-        j === i ? { ...r, qty: Math.max(0, r.qty + d), low: r.qty + d <= 1 } : r
-      )
-    );
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-end justify-center bg-[rgba(8,23,45,.45)]">
-      <div className="max-h-[92vh] w-full max-w-[430px] overflow-y-auto rounded-t-3xl bg-white p-6 pb-8">
-        <div className="mx-auto mb-4 h-[4px] w-[38px] rounded-full bg-navy/15" />
-        <div className="text-[19px] font-black text-navy">안심케어박스 점검</div>
-        <p className="mt-1 text-[12px] leading-[1.6] text-muted">
-          품목별 잔여량·유효기간·개봉 여부를 기록합니다. 의약품은{" "}
-          <b>수량 확인과 구매대행만</b> — 복약 보조는 직무 범위가 아닙니다.
-        </p>
-
-        <button
-          onClick={() => setPhotoTaken(true)}
-          className={`btn-press mt-4 w-full rounded-xl border py-3 text-[15px] font-bold ${
-            photoTaken ? "border-green/30 bg-green/10 text-green" : "border-navy/20 text-navy"
-          }`}
-        >
-          {photoTaken ? "✓ 기존 키트 전체사진 촬영됨 (데모)" : "기존 키트 전체사진 촬영"}
-        </button>
-
-        <div className="mt-4 space-y-3">
-          {rows.map((r, i) => (
-            <div key={r.name} className="rounded-xl border border-navy/10 p-3">
-              <div className="flex items-center gap-2">
-                <span className="flex-1 text-[15px] font-bold text-ink">
-                  {r.name}
-                  {r.isMedicine && (
-                    <span className="ml-1.5 rounded bg-amber/10 px-1.5 py-[1px] text-[10px] font-bold text-amber">
-                      수량 확인만
-                    </span>
-                  )}
-                </span>
-                {r.low && (
-                  <Badge fg="#C0392B" bg="rgba(192,57,43,.1)">
-                    보충 필요
-                  </Badge>
-                )}
-              </div>
-              <div className="mt-2 flex items-center gap-3 text-[13px] text-muted">
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => setQty(i, -1)}
-                    className="btn-press h-[30px] w-[30px] rounded-lg border border-navy/15 font-bold"
-                  >
-                    −
-                  </button>
-                  <span className="w-[52px] text-center font-num font-bold text-navy">
-                    {r.qty}
-                    {r.unit}
-                  </span>
-                  <button
-                    onClick={() => setQty(i, 1)}
-                    className="btn-press h-[30px] w-[30px] rounded-lg border border-navy/15 font-bold"
-                  >
-                    +
-                  </button>
-                </div>
-                {r.expiry && <span>유효 {r.expiry}</span>}
-                <span>{r.opened ? "개봉" : "미개봉"}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {refill.length > 0 && (
-          <div className="mt-4 rounded-xl border border-amber/30 bg-[#FFF7E8] p-3.5 text-[13px] leading-[1.7] text-[#5A4A22]">
-            보충 필요 {refill.length}건: {refill.join(", ")}
-            <br />
-            예상 금액 <b className="font-num">{fmtWon(estAmount)}</b> — 보호자 승인 요청과 함께
-            전송됩니다.
-          </div>
-        )}
-
-        {/* 새 키트 전달사진 — 교체 완료 증빙 */}
-        <button
-          onClick={() => setNewKitPhoto(true)}
-          className={`btn-press mt-3 w-full rounded-xl border py-3 text-[15px] font-bold ${
-            newKitPhoto ? "border-green/30 bg-green/10 text-green" : "border-navy/20 text-navy"
-          }`}
-        >
-          {newKitPhoto ? "✓ 새 키트 전달사진 촬영됨 (데모)" : "새 키트 전달사진 촬영"}
-        </button>
-
-        <div className="mt-5 flex gap-2">
-          <GhostButton onClick={onClose} className="flex-1">
-            닫기
-          </GhostButton>
-          <PrimaryButton
-            className="flex-[2]"
-            disabled={!photoTaken || !newKitPhoto}
-            onClick={() => onDone({ items: rows, refill, estAmount })}
-          >
-            점검 완료{refill.length > 0 ? " + 승인 요청 보내기" : ""}
-          </PrimaryButton>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // 관찰 리포트 시트 — REQ-11. 관찰 사실과 발언 인용만. 진단·소견 금지.
 // 관찰 리포트 시트(REQ-11 12항목)는 삭제했다 (2026-08-21 시트 컨시어지 전체 2번).
 // 방문·리포트 탭을 합치면서 리포트를 쓰는 자리가 두 곳이 됐는데, 12항목은
@@ -2621,3 +2595,13 @@ function KitSheet({ items, _onboarding, onClose, onDone }) {
 // 위험물·조명·냉난방)이 이미 덮는다. 두 벌을 두면 어디에 적었는지 알 수 없다.
 // 되살리려면 git 이력에서 ReportSheet 를 꺼내 리포트 구역에 붙이면 된다.
 
+// 테스트 계정은 자기 역할 화면만 — 다른 역할이면 안내를 띄운다 (components/RoleGate.jsx)
+export default function ConciergePageGated() {
+  return (
+    <RoleGate role="concierge" title="컨시어지">
+      <ConciergePage />
+      {/* 도와줘요 — 어느 탭에서든 팝업 (2026-10-05) */}
+      <HelpCallPopup role="concierge" />
+    </RoleGate>
+  );
+}

@@ -24,13 +24,18 @@ const KIND_LABEL = { ...AUDIT_KINDS, ...REAL_KINDS };
 const KIND_OF_TYPE = {
   login: "auth",
   demo: "sos", ackSos: "sos",
-  opsPatch: "dispatch",
+  opsPatch: "dispatch", sosAccept: "dispatch",
   addRequest: "request", transitionRequest: "request", assignRequest: "request",
+  // 2026-10-05 해주세요 승인 · 결제 · 취소 · 환불, 도와줘요 처리 단계
+  requestPaid: "request", approveRequest: "request", declineRequest: "request", respondProposal: "request",
+  cancelRequest: "request", decideCancel: "request", forceCancel: "request", refundDone: "request", noteRequest: "request", helpCall: "request",
   addEvent: "schedule", updateEvent: "schedule", decideEvent: "schedule",
-  addVoice: "message", addReview: "message", welfareAnswer: "message",
+  addVoice: "message", addReview: "message", welfareAnswer: "message", addOpsMessage: "message", ackOpsMessage: "message",
   completeOnboarding: "signup", onboardingPatch: "signup", addPayment: "signup", setBilling: "signup", commitPendingOrder: "signup", addOrder: "signup",
   audit: "visit", advanceVisit: "visit", patchVisit: "visit",
-  guardianPatch: "edit", welfareStatus: "edit", addMyHospital: "edit", setPriority: "edit", addReport: "edit", reset: "edit",
+  visitCheck: "visit", visitLoc: "visit", visitNote: "visit", visitGrade: "visit", visitPhoto: "visit", visitOps: "visit", visitViewed: "visit",
+  escortSave: "visit", escortSend: "visit", escortViewed: "visit",
+  guardianPatch: "edit", setHealth: "edit", welfareStatus: "edit", addMyHospital: "edit", setPriority: "edit", addReport: "edit", reset: "edit",
   pushEvent: "ticker",
 };
 const kstDate = (t) => new Date(t + 9 * 3600 * 1000).toISOString().slice(0, 10);

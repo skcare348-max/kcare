@@ -59,8 +59,11 @@ export default function Visits({ openProfile }) {
   const patch = (id, p) => {
     // 실제 줄 — 관제 몫(검수 · 발송 · 중간 알림 · 후속조치)만 가구 기록으로. 점검 · 사진 · 메모는 컨시어지 앱이 쓴다.
     if (liveOn && visits.find((v) => v.id === id)?.live) {
-      const ops = visitOpsPatch(p);
+      // 시각은 화면 표시용 'HH:MM'과 함께 실제 시각도 남긴다 (보호자 리포트 머리 · 정렬용)
+      const ops = visitOpsPatch({ ...p, ...(p.sentAt ? { sentTs: Date.now() } : {}), ...(p.reviewedAt ? { reviewedTs: Date.now() } : {}) });
       if (Object.keys(ops).length) dispatch?.({ type: "visitOps", patch: ops });
+      // 함께 제출된 동행 기록도 관제 발송 때 보호자에게 간다 — 관제 검수 없이 가족에게 가지 않게 (2026-10-02 QA)
+      if (p.sentAt && appState?.escort?.savedAt && !appState.escort.sentAt) dispatch?.({ type: "escortSend" });
       return;
     }
     setVisits((vs) => vs.map((v) => (v.id === id ? { ...v, ...p } : v)));
@@ -152,7 +155,17 @@ export default function Visits({ openProfile }) {
           </div>
         </Panel>
 
-        {cur ? <VisitDetail visit={cur} onChange={(p) => patch(cur.id, p)} openProfile={openProfile} /> : <Panel><Empty>방문을 선택하면 상세가 여기 표시됩니다.</Empty></Panel>}
+        {cur ? (
+          <VisitDetail
+            visit={cur}
+            onChange={(p) => patch(cur.id, p)}
+            openProfile={openProfile}
+            // 동행 기록은 방문 21항목과 따로 보낸다 — 동행만 한 날(점검 없음)에도 필수 점검에 막히지 않게 (2026-10-02 코드 리뷰)
+            escort={cur.live ? appState?.escort : null}
+            submitted={!!(cur.live && appState?.visit?.reportSent)}
+            onEscortSend={() => dispatch?.({ type: "escortSend" })}
+          />
+        ) : <Panel><Empty>방문을 선택하면 상세가 여기 표시됩니다.</Empty></Panel>}
       </div>
 
       <Note>건강·센서 데이터는 참고자료이며 의료진의 진단을 대신하지 않습니다.</Note>

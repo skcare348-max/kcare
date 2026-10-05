@@ -47,6 +47,9 @@ import {
   mapPeople,
 } from "../lib/console";
 import { useAppState } from "../lib/state";
+import { CLOSED, isVisitCall } from "../lib/requests";
+import { HelpCallOps, HELP_STAGE } from "../components/HelpCall";
+import { relMd } from "../lib/reltime";
 import AiChat from "../components/AiChat";
 import HelpTip from "../components/HelpTip";
 import Icon from "../components/icons";
@@ -78,6 +81,8 @@ import RequestsMgmt from "../components/ops/RequestsMgmt";
 import TogetherMgmt from "../components/ops/TogetherMgmt";
 import CommsMgmt from "../components/ops/CommsMgmt";
 import HospitalsMgmt from "../components/ops/HospitalsMgmt";
+import RoleGate from "../components/RoleGate";
+import { useAuth } from "../lib/auth";
 import Accounts from "../components/ops/Accounts";
 import AuditLog from "../components/ops/AuditLog";
 import Integrations from "../components/ops/Integrations";
@@ -156,7 +161,8 @@ function PanelHead({ title, right }) {
 }
 
 // SOS 경과 — 관제만 본다. 가족 화면 노출 금지 (사건 A 정보 비대칭)
-function useElapsed(active) {
+// 어르신이 누른 시각(sosAt)부터 센다. 관제 화면을 늦게 열거나 새로고침해도 00:00 으로 돌아가지 않게 (2026-10-02 코드 점검).
+function useElapsed(active, since = 0) {
   const startRef = useRef(null);
   const [sec, setSec] = useState(0);
   useEffect(() => {
@@ -165,10 +171,12 @@ function useElapsed(active) {
       setSec(0);
       return undefined;
     }
-    if (!startRef.current) startRef.current = Date.now();
-    const t = setInterval(() => setSec(Math.floor((Date.now() - startRef.current) / 1000)), 1000);
+    startRef.current = Number(since) || startRef.current || Date.now();
+    const tick = () => setSec(Math.max(0, Math.floor((Date.now() - startRef.current) / 1000)));
+    tick();
+    const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-  }, [active]);
+  }, [active, since]);
   return { sec, label: `${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}` };
 }
 
@@ -446,12 +454,13 @@ function WeatherMap() {
   );
 }
 
-export default function DispatchConsole() {
+function DispatchConsole() {
   const { state, dispatch } = useAppState();
+  const liveOn = !!useAuth().user?.household; // 테스트 계정 — 머리 숫자 중 예시인 것에 '예시'를 붙인다
   const { sos, nightOption } = state.demo;
   const { sosDispatched, sos119, assign, unmatchFixed, npsDetractor } = state.ops;
   const checkedIn = state.visit.checkedIn;
-  const { label: elapsed, sec: elapsedSec } = useElapsed(sos);
+  const { label: elapsed, sec: elapsedSec } = useElapsed(sos, state.demo.sosAt);
   const [tab, setTab] = useState("live");
   const [range, setRange] = useState("7");
   const [briefed, setBriefed] = useState(false);
@@ -475,7 +484,7 @@ export default function DispatchConsole() {
   const [hoStage, setHoStage] = useState("accept"); // 핸드오프 정체 — 선택 단계 (기본: 최대 정체)
   const [hoDone, setHoDone] = useState({}); // 정체 건 처리 원샷
   // 사이드바 배지 카운트 — 각 화면 첫 Stat 과 같은 숫자 (어르신 200 · 보호자 218 · 컨시어지 42 · 제휴 병원 · 점검 필요 기기)
-  const { open: sosOpen, hydrated: sosHydrated, start: startIncident } = useIncidents(); // 진행 중 SOS 사건 (요청서 6-6)
+  const { open: sosOpen, hydrated: sosHydrated, start: startIncident, setStep: setIncidentStep } = useIncidents(); // 진행 중 SOS 사건 (요청서 6-6)
   // SOS 팝업 — 새 SOS(sosAt)마다 한 번 뜨고, 닫으면 이 기기에서는 그 SOS 로 다시 뜨지 않는다 (배너는 남는다).
   // 열려 있는 동안 10초마다 알림음을 다시 울린다 (2026-10-02 현장 요청).
   const [sosPopupAck, setSosPopupAck] = useState(null);
@@ -504,6 +513,12 @@ export default function DispatchConsole() {
     const t = setInterval(ringAlarm, 10000);
     return () => clearInterval(t);
   }, [sosPopup]);
+  // 해주세요 관리 숫자 — 관제가 할 일만: 도와줘요 진행 중 · 취소 요청(관제 승인) · 환불 대기 (2026-10-05).
+  // 보호자 · 어르신의 일반 해주세요는 담당 컨시어지가 승인하므로 세지 않는다.
+  const newRequests = [
+    ...(state.requests || []).filter((r) => (isVisitCall(r) && !CLOSED.includes(r.status)) || r.status === "cancelRequested"),
+    ...(state.payments || []).filter((p) => p.refund && p.refund.status !== "done"),
+  ];
   const MENU_COUNTS = {
     sos: sosOpen.length,
     elder: TOTAL_ELDERS,
@@ -513,6 +528,8 @@ export default function DispatchConsole() {
     wearable: FLEET.needsCheck,
     // 관제 연락(컨시어지 '관제에 알리기') 중 확인 전 — 있으면 커뮤니케이션 메뉴에 숫자 (2026-10-02)
     ...((state.opsMessages || []).some((m) => !m.ackAt) ? { comms: (state.opsMessages || []).filter((m) => !m.ackAt).length } : {}),
+    // 해주세요 — 관제가 처리할 것 (도와줘요 · 취소 요청 · 환불 대기)
+    ...(newRequests.length ? { requests: newRequests.length } : {}),
   };
   const sosUnread = sosOpen.some((i) => i.state === "new"); // 미확인 사건 — 사이드바 점등
 
@@ -553,6 +570,27 @@ export default function DispatchConsole() {
     }
     setSosFocus(id);
   }, [sos, sosAt, sosHydrated, sosOpen, startIncident]);
+  // 컨시어지가 앱에서 급파를 수락하면(ops.sosAcceptedAt) SOS 센터 파견 기록의 '수락' 칸을 그 시각으로 채운다 —
+  // 관제사가 전화로 다시 물어 손으로 찍지 않아도 되게 (2026-10-02). 이미 찍힌 값은 덮지 않는다.
+  const sosAcceptedAt = state.ops.sosAcceptedAt || null;
+  // 배너 · 팝업의 '급파 지시' — 가구 기록(ops.sosDispatched)과 SOS 센터 사건의 파견 기록을 같이 남긴다.
+  // 전에는 가구 기록만 바뀌어서 SOS 센터 6-5 파견 칸이 비어 있고, 컨시어지 수락 시각이 붙을 자리가 없었다 (2026-10-02).
+  const orderSosDispatch = () => {
+    if (sosDispatched) return;
+    dispatch({ type: "opsPatch", patch: { sosDispatched: true } });
+    push("대응", "박지현 급파 지시 · 119 연계 대기", "#FF8A80");
+    const inc = sosOpen.find((i) => i.customer === ELDER.name);
+    if (inc && !inc.steps?.dispatch?.dispatch) {
+      setIncidentStep(inc.id, "dispatch", { result: "done", dispatch: { name: "박지현", two: true, orderedAt: Date.now(), acceptedAt: sosAcceptedAt, departedAt: null, arrivedAt: null, actions: "", accompany: false, etaMin: 6, distKm: 1.2 } }, { advance: false });
+    }
+  };
+  useEffect(() => {
+    if (!sosAcceptedAt) return;
+    const inc = sosOpen.find((i) => i.customer === ELDER.name);
+    const d = inc?.steps?.dispatch?.dispatch;
+    if (!inc || !d || d.acceptedAt) return;
+    setIncidentStep(inc.id, "dispatch", { dispatch: { ...d, acceptedAt: sosAcceptedAt } }, { advance: false });
+  }, [sosAcceptedAt, sosOpen, setIncidentStep]);
   const [profile, setProfile] = useState(null); // 플로팅 프로필 카드
   const [profilePos, setProfilePos] = useState({ x: 0, y: 0 }); // 클릭 지점 — 카드가 근처에 뜬다
   const lastPointer = useRef({ x: 0, y: 0 });
@@ -667,11 +705,14 @@ export default function DispatchConsole() {
 
   // ── 액션 큐 — 지금 관제가 처리할 일. 우선순위·마감을 한 줄로 (상황파악 → 적시 대응) ──
   const [handled, setHandled] = useState({});
+  const [helpOpen, setHelpOpen] = useState(null); // 도와줘요 대응 팝업 — 지금 처리할 일에서 다시 연다
   const [watchCalled, setWatchCalled] = useState(false);
   const [guardianPinged, setGuardianPinged] = useState(false);
   const [nightCalled, setNightCalled] = useState(false); // 야간 출동(외주) 호출 — REQ-04
   const pendingEvents = (state.events || []).filter((e) => e.approval === "pending").length;
   const actions = [];
+  // 만족도를 남긴 보호자 — 테스트 가구는 '김순자 님 보호자 (관계)'로 (예시 보호자 '김민수'로 찍지 않는다)
+  const npsWho = liveOn ? `${ELDER.name} 님 보호자${state.onboarding?.rel ? ` (${state.onboarding.relDetail || state.onboarding.rel})` : ""}` : "김민수";
   if (sos)
     actions.push({
       id: "sos", level: "critical",
@@ -686,9 +727,9 @@ export default function DispatchConsole() {
   if (npsDetractor && !handled.npsCall)
     actions.push({
       id: "npsCall", level: "high",
-      title: `만족도 ${npsDetractor.score}점 회복 콜 — 김민수 (${npsDetractor.reason || "사유 미선택"})`,
+      title: `만족도 ${npsDetractor.score}점 회복 콜 — ${npsWho} (${npsDetractor.reason || "사유 미선택"})`,
       meta: "보호자 앱 NPS 접수 → 24h SLA · 회복이 먼저", act: "콜 완료",
-      ticker: ["대응", "NPS 회복 콜 완료 — 김민수 · 조치 결과 가족 공유 예정", "#8FA9CC"],
+      ticker: ["대응", `NPS 회복 콜 완료 — ${npsWho} · 조치 결과 가족 공유 예정`, "#8FA9CC"],
       clear: { npsDetractor: null },
     });
   if (assign === "pending")
@@ -713,23 +754,44 @@ export default function DispatchConsole() {
       id: "brief", level: "med", title: "외출 브리핑 3건 발송",
       meta: "최정자 34점 — 일정 조정 권고 포함", jumpTab: "plan",
     });
-  // 어르신 화면에서 온 부탁 — 도와줘요(즉시 방문) · 해주세요 · 복지혜택 (2026-09-04 시트
-  // 어르신 해주세요 3번: "관제가 먼저 전화로 확인한다고 되어 있으나 관제 대시보드에 없음").
-  // 어르신 화면은 '관제센터에서 확인 전화를 드립니다'라고 약속하므로, 확인 전화를 여기서
-  // 끝내면 그 건이 '확인됨'으로 넘어가 어르신·컨시어지 화면 문구가 같이 바뀐다.
+  // 도와줘요(어르신 즉시 방문 요청) — 관제가 처리한다 (2026-10-05). 새로 오면 팝업이 뜨고(HelpCallOps),
+  // 끝날 때까지 여기 남아 '대응 열기'로 다시 연다. 해주세요(보호자 · 어르신 부탁)는 담당 컨시어지가 승인하므로 여기 올리지 않는다.
   (state.requests || [])
-    .filter((r) => r.dir === "fromElder" && r.status === "requested")
+    .filter((r) => isVisitCall(r) && !CLOSED.includes(r.status))
     .forEach((r) =>
       actions.push({
-        id: `elder-${r.id}`,
-        level: r.urgency === "urgent" ? "high" : "med",
-        title: `${r.type} — ${ELDER.name} (${ELDER.age})`,
-        meta: `어르신 화면 · ${r.detail}`,
-        act: "확인 전화 완료",
-        ticker: ["대응", `${ELDER.name} ${r.type} 확인 전화 완료 — 컨시어지 ${r.assignee} 진행`, "#8FA9CC"],
-        onAct: () => dispatch({ type: "transitionRequest", id: r.id, to: "confirmed", note: "관제 확인 전화 완료 · 컨시어지 진행" }),
+        id: `help-${r.id}`,
+        level: "critical",
+        title: `도와줘요 — ${ELDER.name} (${ELDER.age}) 즉시 방문 요청`,
+        meta: `${HELP_STAGE[r.status] || ""} · ${r.history?.[r.history.length - 1]?.note || "어르신 화면"}`,
+        view: "대응 열기",
+        onOpen: () => setHelpOpen(r.id),
       })
     );
+  // 해주세요 취소 요청 — 서비스일 3일 안이라 관제 승인이 필요한 것 (2026-10-05)
+  (state.requests || [])
+    .filter((r) => r.status === "cancelRequested")
+    .forEach((r) =>
+      actions.push({
+        id: `cancel-${r.id}`,
+        level: "high",
+        title: `해주세요 취소 요청 — ${r.type}`,
+        meta: `${r.cancelReq?.by || "요청자"} · ${r.scheduledDate || ""} ${r.scheduledTime || ""} · 해주세요 관리에서 승인 · 반려`,
+        menu: "requests",
+      })
+    );
+  // 환불 대기 — 거절 · 취소된 해주세요의 결제 (토스 상점관리자에서 환불한 뒤 '환불 완료')
+  {
+    const refunds = (state.payments || []).filter((p) => p.refund && p.refund.status !== "done");
+    if (refunds.length)
+      actions.push({
+        id: "refunds",
+        level: "high",
+        title: `환불 대기 ${refunds.length}건`,
+        meta: `${refunds.map((p) => `${p.orderName || "해주세요"} ${Number(p.refund.amount || 0).toLocaleString("ko-KR")}원`).join(" · ")} — 해주세요 관리`,
+        menu: "requests",
+      });
+  }
   // 컨시어지 '관제에 알리기' — 확인 전인 것은 지금 처리할 일에 올린다 (2026-10-02). 확인하면 컨시어지 화면에 '관제 확인'.
   (state.opsMessages || [])
     .filter((m) => !m.ackAt)
@@ -755,6 +817,8 @@ export default function DispatchConsole() {
     : { label: "정상 운영", cls: "bg-[rgba(30,122,90,.12)] text-green" };
 
   const jumpTo = (a) => {
+    if (a.onOpen) return a.onOpen();
+    if (a.menu) return setMenu(a.menu);
     setMenu("dash");
     if (a.jumpTab) {
       setTab(a.jumpTab);
@@ -770,9 +834,9 @@ export default function DispatchConsole() {
     all: null,
     urgent: ["SOS", "대응", "환경"],
     dispatchG: ["배차", "동행", "예약", "브리핑"],
-    care: ["복약", "리포트", "메시지", "어르신", "체크인", "일정"],
+    care: ["복약", "리포트", "메시지", "어르신", "체크인", "일정", "건강"],
     talk: ["관제 연락", "관제", "음성", "부탁", "메시지", "CS", "감사"],
-    commerce: ["구매대행", "장바구니", "스토어", "옵션", "정산", "보험", "제안", "설정"],
+    commerce: ["구매대행", "구매", "장바구니", "스토어", "옵션", "정산", "보험", "제안", "설정", "결제"],
   };
   const tickerGroup = TICKER_GROUPS[tickerFilter];
   const tickerItems = state.ticker.filter((e) => !tickerGroup || tickerGroup.includes(e.kind));
@@ -998,7 +1062,10 @@ export default function DispatchConsole() {
                   className="card-glass btn-press min-w-[104px] rounded-xl px-4 py-[11px] text-left"
                   title="클릭하면 해당 화면으로 이동"
                 >
-                  <div className="text-[11px] font-bold text-muted">{k.k}</div>
+                  <div className="text-[11px] font-bold text-muted">
+                    {k.k}
+                    {liveOn && !k.menu && <span className="ml-1 font-normal text-muted/70">예시</span>}
+                  </div>
                   <div className="font-num text-[22px] font-bold" style={{ color: k.color }}>
                     {k.v}
                   </div>
@@ -1054,9 +1121,11 @@ export default function DispatchConsole() {
             </div>
           </nav>
 
+          {/* 도와줘요 — 새로 오면 저절로, 지금 처리할 일 '대응 열기'로 다시 (2026-10-05) */}
+          <HelpCallOps openId={helpOpen} onClose={() => setHelpOpen(null)} />
           {sosPopup && (
             <SosAlertModal
-              customer={liveCustomer(ELDER.name, state.onboarding)}
+              customer={liveCustomer(ELDER.name, state.onboarding, state.health)}
               sosAt={state.demo.sosAt}
               elapsed={elapsed}
               dispatched={sosDispatched}
@@ -1065,11 +1134,7 @@ export default function DispatchConsole() {
                 setSosFocus(sosOpen.find((i) => i.customer === ELDER.name)?.id || null);
                 setMenu("sos");
               }}
-              onDispatch={() => {
-                if (sosDispatched) return;
-                dispatch({ type: "opsPatch", patch: { sosDispatched: true } });
-                push("대응", "박지현 급파 지시 · 119 연계 대기", "#FF8A80");
-              }}
+              onDispatch={orderSosDispatch}
               onClose={closeSosPopup}
             />
           )}
@@ -1084,7 +1149,9 @@ export default function DispatchConsole() {
               </span>
               <div className="min-w-[240px] flex-1">
                 <div className="text-[17px] font-bold">
-                  어르신 SOS 버튼 발신 · 김순자 (78) · 강남구 대치동 — 최근접 컨시어지 박지현 (1.2km)
+                  어르신 SOS 버튼 발신 · 김순자 (78) ·{" "}
+                  {/* 테스트 가구는 가입 상담 주소 — 예시 '강남구 대치동'이 실제 주소와 어긋났다 (2026-10-02 QA) */}
+                  {liveOn ? liveCustomer(ELDER.name, state.onboarding, state.health).address : "강남구 대치동"} — {liveOn ? "담당 컨시어지 박지현" : "최근접 컨시어지 박지현 (1.2km)"}
                 </div>
                 {/* 같은 사건이 SOS 센터에도 있다 — 여기는 급파·119 즉시 조치, 13단계 절차·종료는 센터에서 */}
                 <div className="mt-0.5 font-num text-[12px] opacity-[.88]">
@@ -1107,7 +1174,7 @@ export default function DispatchConsole() {
                   />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {[["접수", true], ["급파", sosDispatched], ["119 연계", sos119], ["해제", false]].map(([st, done]) => (
+                  {[["접수", true], ["급파", sosDispatched], ["컨시어지 수락", !!sosAcceptedAt], ["119 연계", sos119], ["해제", false]].map(([st, done]) => (
                     <span
                       key={st}
                       className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
@@ -1122,15 +1189,15 @@ export default function DispatchConsole() {
               <div className="flex flex-wrap gap-2">
                 {/* 급파 지시가 해제보다 시각적으로 강하다 — 실수 방지 (09 §2) */}
                 <button
-                  onClick={() => {
-                    if (sosDispatched) return;
-                    dispatch({ type: "opsPatch", patch: { sosDispatched: true } });
-                    push("대응", "박지현 급파 지시 · 119 연계 대기", "#FF8A80");
-                  }}
+                  onClick={orderSosDispatch}
                   disabled={sosDispatched}
                   className="btn-press btn-on-red rounded-xl bg-white px-4 py-2.5 text-[15px] font-bold text-danger disabled:opacity-80"
                 >
-                  {sosDispatched ? "급파 중 · 박지현" : "급파 지시 (주간 · 가용)"}
+                  {sosDispatched
+                    ? sosAcceptedAt
+                      ? `박지현 수락 ${new Date(sosAcceptedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })} · 이동 중`
+                      : "급파 중 · 박지현 수락 대기"
+                    : "급파 지시 (주간 · 가용)"}
                 </button>
                 <button
                   onClick={() => {
@@ -1231,11 +1298,13 @@ export default function DispatchConsole() {
                 setSosFocus(id || null);
                 setMenu("sos");
               }}
+              onMenu={setMenu}
               mapSlot={mapPanel}
               opsCount={actions.length}
               // 어르신 앱은 "관제센터에서 확인 전화를 드립니다"라고 약속한다 — 그 부탁이 들어와 있으면 접어 두지 않는다.
               // 보호자 일정등록 요청도 같다 — 관제가 승인해야 캘린더에 오르는데, 접혀 있으면 아무도 못 본다 (2026-10-01 관제 테스트).
-              opsOpen={actions.some((a) => a.level === "critical" || a.id.startsWith("elder-")) || pendingEvents > 0}
+              // 도와줘요 · 해주세요 취소 요청 · 환불 대기도 관제가 직접 할 일이라 펼친다 (2026-10-05)
+              opsOpen={actions.some((a) => a.level === "critical" || /^(elder-|help-|cancel-|refunds)/.test(a.id)) || pendingEvents > 0}
               opsNote={pendingEvents > 0 ? `일정 승인 대기 ${pendingEvents}건` : null}
               opsSlot={<>
           {/* ── 방문 업무흐름 8단계 — 일정 수립 알람이 여기로 온다 (2026-08-13 미팅) ── */}
@@ -1295,7 +1364,7 @@ export default function DispatchConsole() {
                         onClick={() => jumpTo(a)}
                         className="btn-press shrink-0 rounded-[10px] border border-navy/20 px-3.5 py-2 text-[13px] font-bold text-navy"
                       >
-                        보기 →
+                        {a.view || "보기 →"}
                       </button>
                     )}
                   </div>
@@ -1848,7 +1917,7 @@ export default function DispatchConsole() {
                     ))}
                   </div>
                   <p className="mt-3 border-t border-navy/[.08] pt-2 text-[11px] leading-[1.7] text-muted">
-                    이수민은 상한 임박으로 오늘 배차 후보에서 자동 제외됐고 7/29 투석 건 AI 제안에서도
+                    이수민은 상한 임박으로 오늘 배차 후보에서 자동 제외됐고 {relMd(2)} 투석 건 AI 제안에서도
                     빠졌습니다 — 피곤한 동행자가 어르신을 부축하는 것이 가장 흔한 사고 원인입니다.
                   </p>
                 </Panel>
@@ -1927,7 +1996,7 @@ export default function DispatchConsole() {
                   ))}
                 </div>
                 <p className="mt-2.5 text-[11px] leading-[1.6] text-muted">
-                  31일(금) 폭염 특보 예보 — 배차 6건 중 3건에 일정 조정 권고를 선제 발송할 수 있습니다
+                  (예시) 특보 예보가 뜨면 — 배차 6건 중 3건에 일정 조정 권고를 선제 발송할 수 있습니다
                   (F8-4)
                 </p>
               </Panel>
@@ -2050,7 +2119,9 @@ export default function DispatchConsole() {
           {menu === "weather" && (
             <div className="mt-4 grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(360px, 100%), 1fr))" }}>
               <Panel className="min-w-0">
-                <PanelHead title="현재 기상 — 강남지점 권역" right={WEATHER_NOW.updated} />
+                {/* 날씨는 아직 고정 예시값이다 — 10월에 '폭염 · 체감 36°'가 실제처럼 보이지 않게 표기한다 (2026-10-02 QA).
+                    실제 값은 기상 데이터 연동 뒤에 들어온다. */}
+                <PanelHead title="현재 기상 — 강남지점 권역" right={`예시 날씨 · 실제 연동 전`} />
                 {/* 특보 배너 — 빨강은 위험 신호 전용 원칙과 일치 */}
                 <div className="mt-3 rounded-xl border border-danger/25 bg-danger/[.07] px-4 py-3">
                   <div className="flex flex-wrap items-center gap-2">
@@ -2281,6 +2352,7 @@ export default function DispatchConsole() {
 }
 
 // 보호자 일정등록 요청 승인 큐 — 2026-08-12 보호자화면 시트 예약 1번.
+// 어르신이 남긴 병원 · 부탁할 일도 같은 큐로 온다 (2026-10-02 QA — 승인 없이 '동행 확정'으로 뜨던 것).
 //
 // 보호자가 K-CARE 일정을 등록하면 바로 캘린더에 뜨지 않는다. 관제가 팀 배정과
 // 배차가 가능한지 보고 승인해야 어르신·컨시어지 화면에 올라간다. 승인 없이
@@ -2301,7 +2373,7 @@ function EventApprovals() {
           approval === "approved"
             ? `일정등록 요청 승인 — ${e.title} · 어르신·보호자·컨시어지 캘린더 반영`
             : `일정등록 요청 반려 — ${e.title} · 사유는 해주세요로 전달`,
-        color: approval === "approved" ? "#8FE3C0" : "#FF8A80",
+        color: approval === "approved" ? "#8FE3C0" : "#F0D9A8", // 반려는 위험 신호가 아니다 — 빨강 대신 금색
       },
     });
   };
@@ -2311,7 +2383,7 @@ function EventApprovals() {
   return (
     <section className="card-glass mt-[18px] rounded-[14px] px-5 py-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-[15px] font-bold tracking-[.02em] text-navy">보호자 일정등록 요청</h2>
+        <h2 className="text-[15px] font-bold tracking-[.02em] text-navy">일정등록 요청 — 보호자 · 어르신</h2>
         <span className="font-num text-[12px] text-muted">{pending.length}건 · 승인 대기</span>
       </div>
       <p className="mt-1 text-[12px] leading-[1.7] text-muted">
@@ -2336,7 +2408,7 @@ function EventApprovals() {
             <div className="min-w-[160px] flex-1">
               <div className="text-[15px] font-bold text-navy">{e.title}</div>
               <div className="text-[12px] text-muted">
-                {e.source} ·{" "}
+                {e.by === "elder" ? "어르신 직접 등록" : e.source} ·{" "}
                 <span className={e.escort ? "font-bold text-amber" : ""}>
                   {e.escort ? "동행 필요 — 배차 검토" : "동행 불필요 — 일정 공유만"}
                 </span>
@@ -2684,5 +2756,14 @@ function FloatProfile({ item, pos, onClose, onAction }) {
         />
       )}
     </div>
+  );
+}
+
+// 테스트 계정은 자기 역할 화면만 — 다른 역할이면 안내를 띄운다 (components/RoleGate.jsx)
+export default function DispatchConsoleGated() {
+  return (
+    <RoleGate role="ops" title="관제">
+      <DispatchConsole />
+    </RoleGate>
   );
 }

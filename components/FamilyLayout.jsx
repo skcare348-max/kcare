@@ -6,6 +6,8 @@ import { ELDER } from "../lib/mock";
 import { trackOf, honorific } from "../lib/tracks";
 import { useAppState } from "../lib/state";
 import Splash from "./Splash";
+import RoleGate from "./RoleGate";
+import { HelpCallPopup } from "./HelpCall";
 
 const TABS = [
   { href: "/family", label: "홈", icon: "home" },
@@ -28,11 +30,12 @@ export default function FamilyLayout({ children, title, action }) {
   // 정기 케어에서 subjectLabel 을 쓰면 온보딩 전 데모에서 "어르신 · 김순자"가 된다.
   // 2026-08-12 시트가 고객 호칭을 전부 "~~님"으로 통일하라고 해서 honorific 을 쓴다.
   const track = trackOf(state.onboarding?.track);
+  // 옆의 '주 보호자' 배지가 이름에 붙어 '김순자 님 · 주 보호자'로 읽히지 않게 — '김순자 님 가족' (2026-10-02 QA)
   const heading =
-    track.id === "elder" ? honorific(state.onboarding) : `${track.short} · ${elderName}`;
+    track.id === "elder" ? `${honorific(state.onboarding)} 가족` : `${track.short} · ${elderName}`;
 
   return (
-    <>
+    <RoleGate role="guardian" title="보호자">
       <Splash service="family" />
     <div className="min-h-screen bg-nav">
       <div className="relative mx-auto flex min-h-screen w-full max-w-[430px] flex-col bg-paper shadow-[0_0_60px_rgba(0,0,0,.45)]">
@@ -72,6 +75,9 @@ export default function FamilyLayout({ children, title, action }) {
 
         <main className="flex-1 space-y-3.5 overflow-y-auto px-4 pb-28 pt-4">{children}</main>
 
+        {/* 도와줘요 — 어르신이 누르면, 관제가 단계를 넘길 때마다 어느 탭에서든 뜬다 (2026-10-05) */}
+        <HelpCallPopup role="guardian" />
+
         <nav className="fixed bottom-0 left-1/2 z-30 w-full max-w-[430px] -translate-x-1/2 border-t border-navy/10 bg-white/95 backdrop-blur">
           <div className="grid grid-cols-5">
             {TABS.map((t) => {
@@ -102,6 +108,6 @@ export default function FamilyLayout({ children, title, action }) {
         </nav>
       </div>
     </div>
-    </>
+    </RoleGate>
   );
 }

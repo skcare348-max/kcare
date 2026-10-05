@@ -4,10 +4,15 @@ import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import Icon from "../../components/icons";
 import { GLOSSARY, sha256Hex } from "../../lib/glossary";
-import { ALL_ITEMS, RESULT_TONE, STATE_ORDER, VISIT_REPORT, countStates } from "../../lib/visit-report";
+import { ALL_ITEMS, RESULT_TONE, STATE_ORDER, VISIT_GRADES, VISIT_REPORT, countStates } from "../../lib/visit-report";
+import { useAppState } from "../../lib/state";
+import { useAuth } from "../../lib/auth";
+import { STAGE_LABEL, visitReportOf } from "../../lib/live-household";
+import { LIVE_ELDER } from "../../lib/ops-health";
 import {
   AI_REPORT,
   CARE_OUTCOMES,
+  CARE_TEAM,
   CRM_TIMELINE,
   EXEC_BRIEF,
   LIFECYCLE_STAGES,
@@ -33,11 +38,14 @@ export function canonicalDoc(type) {
   return JSON.stringify({ type, period: "2026-07", v: 1 });
 }
 
-function DocShell({ title, period, backHref, backLabel, docType, glossary = [], children }) {
+// live — 테스트 가구의 실제 리포트: { stamp: 머리 둘째 줄, canon: 지문 입력(실제 내용) } (2026-10-02).
+// 데모 문서의 '2026.07.30 생성 · 데모 데이터'와 체인 앵커링 예시 문구를 실제 문서에 붙이지 않는다.
+function DocShell({ title, period, backHref, backLabel, docType, glossary = [], live = null, children }) {
   const [hash, setHash] = useState("");
+  const canon = live?.canon || canonicalDoc(docType);
   useEffect(() => {
-    sha256Hex(canonicalDoc(docType)).then(setHash).catch(() => {});
-  }, [docType]);
+    sha256Hex(canon).then(setHash).catch(() => {});
+  }, [canon]);
   return (
     <>
       <Head>
@@ -80,7 +88,7 @@ function DocShell({ title, period, backHref, backLabel, docType, glossary = [], 
             </div>
             <div className="text-right text-[11px] leading-[1.7] text-muted">
               <div>{period}</div>
-              <div>2026.07.30 생성 · 데모 데이터</div>
+              <div>{live ? live.stamp : "2026.07.30 생성 · 데모 데이터"}</div>
             </div>
           </header>
           {children}
@@ -95,14 +103,15 @@ function DocShell({ title, period, backHref, backLabel, docType, glossary = [], 
             </div>
           )}
           <footer className="mt-5 border-t border-navy/15 pt-3 text-[10px] leading-[1.7] text-muted">
-            본 문서는 의료 기록이 아니며 진단·소견을 포함하지 않습니다 · AI 초안은 사람 검수 후
-            확정됩니다 (8.4 Human-in-the-loop) · 문의 K-CARE 케어센터 1588-0000
+            본 문서는 의료 기록이 아니며 진단·소견을 포함하지 않습니다 ·{" "}
+            {live ? "컨시어지 방문 기록을 관제가 검수해 보냅니다" : "AI 초안은 사람 검수 후 확정됩니다 (8.4 Human-in-the-loop)"} · 문의 K-CARE 케어센터 1588-0000
             <div className="mt-2 rounded-lg border border-navy/15 px-3 py-2">
               <span className="font-bold" style={{ color: NAVY }}>위변조 검증 — 문서 지문 (SHA-256)</span>
               <span className="ml-2 break-all font-num">{hash || "계산 중…"}</span>
               <div className="mt-1">
-                검증 방법: K-CARE 앱 → /report/verify 에서 지문 대조 · 체인 앵커링: K-CARE Trust
-                Chain 블록 #182,340 · 2026.07.30 14:00 (데모 — 퍼블릭 체인 연동 대기)
+                {live
+                  ? "이 리포트 내용으로 계산한 지문입니다 · 체인 앵커링은 베타에서 아직 연결하지 않았습니다"
+                  : "검증 방법: K-CARE 앱 → /report/verify 에서 지문 대조 · 체인 앵커링: K-CARE Trust Chain 블록 #182,340 · 2026.07.30 14:00 (데모 — 퍼블릭 체인 연동 대기)"}
               </div>
             </div>
           </footer>
@@ -463,6 +472,220 @@ function VisitReport() {
   );
 }
 
+// ── 테스트 가구 1 의 실제 안심방문 리포트 (2026-10-02 "보호자 리포트도 연동") ──
+// 컨시어지 방문 기록(21항목 · 항목 메모 · 총평 · 사진 수) → 관제 검수 → 관제가 '보호자 리포트 발송'을 해야 열린다.
+// 발송 전이면 지금 어느 단계인지만 보여 준다. 처음 열면 관제 방문관리에 '보호자 열람 완료'.
+// 항목 상태(양호 · 관찰 · 주의)는 컨시어지가 고른 항목에만 붙인다. 종합 판정은 만들지 않는다 — 본 것 · 확인한 것만.
+const ymdDot = (t) => (t ? new Date(Number(t) + 9 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, ".") : "—");
+function LiveVisitReport() {
+  const { state, dispatch } = useAppState();
+  const r = visitReportOf(state);
+  const { query } = useRouter();
+  const fromFamily = query.from === "family";
+  const viewed = r.viewed;
+  // '보호자 열람'은 보호자 계정이 열었을 때만 — 컨시어지 · 관제가 같은 주소를 열어도 열람으로 치지 않는다 (2026-10-02 코드 점검)
+  const asGuardian = useAuth().user?.role === "guardian";
+  useEffect(() => {
+    if (fromFamily && asGuardian && r.sent && !viewed) dispatch({ type: "visitViewed" });
+  }, [fromFamily, asGuardian, r.sent, viewed, dispatch]);
+  const back = { backHref: fromFamily ? "/family/my" : "/concierge", backLabel: fromFamily ? "마이로" : "컨시어지로" };
+  if (!r.sent)
+    return (
+      <DocShell title="안심방문 리포트" period="테스트 가구 1 · 발송 전" {...back} docType="visit-live" live={{ stamp: "관제 검수 뒤 발송", canon: "visit-live-pending" }}>
+        <div className="mt-4 rounded-[14px] border border-navy/[.1] px-5 py-6 text-center">
+          <div className="text-[16px] font-black" style={{ color: NAVY }}>이번 방문 리포트는 아직 오지 않았습니다</div>
+          <p className="mt-2 text-[13px] leading-[1.8] text-muted">
+            컨시어지가 방문을 마치면 관제가 기록을 검수한 뒤 보내 드립니다.
+            <br />
+            지금 단계: <b className="text-ink">{STAGE_LABEL[r.stage]}</b>
+            {r.stage === "active" ? ` · 점검 ${r.done}/${r.total}` : ""}
+          </p>
+        </div>
+      </DocShell>
+    );
+  return (
+    <DocShell
+      title="안심방문 리포트"
+      period={`${ymdDot(r.visitedTs)} 방문 · 테스트 가구 1`}
+      {...back}
+      docType="visit-live"
+      live={{ stamp: `${ymdDot(r.sentTs)} 발송 · 실제 방문 기록`, canon: JSON.stringify({ type: "visit-live", visitedTs: r.visitedTs, sentTs: r.sentTs, axes: r.axes, memo: r.memo, photos: r.photos }) }}
+    >
+      <div className="avoid-break mt-3 flex flex-col gap-3 rounded-[14px] px-5 py-4 sm:flex-row sm:items-start sm:gap-4" style={{ background: NAVY }}>
+        <div className="min-w-0 flex-1 text-white">
+          <div className="text-[10px] font-bold tracking-[.08em] text-white/60">케이케어 방문 리포트 · 테스트 가구 1 · 실제 방문 기록</div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-[24px] font-black">{r.client}</span>
+            <span className="text-[12px] text-white/75">어르신</span>
+          </div>
+          <div className="mt-1 text-[10.5px] leading-[1.7] text-white/70">
+            {ymdDot(r.visitedTs)} 방문 · 담당 컨시어지 {r.concierge.pri}{r.concierge.sub ? ` · ${r.concierge.sub}` : ""} · 관제 검수 {r.reviewedAt || "—"} · 발송 {r.sentAt}
+          </div>
+        </div>
+        <span className="flex h-[54px] w-[54px] shrink-0 flex-col items-center justify-center rounded-full text-center text-[8px] font-bold leading-[1.4] text-white/80" style={{ border: "1.5px solid rgba(255,255,255,.4)" }}>
+          <span>방문확인</span>
+          <span className="font-num text-[10px]">{ymdDot(r.visitedTs).slice(5)}</span>
+          <span className="text-[7px] tracking-[.08em]">K-CARE</span>
+        </span>
+      </div>
+
+      <div className="avoid-break mt-3 grid grid-cols-2 gap-3 rounded-[14px] border border-navy/[.1] px-5 py-4 sm:grid-cols-4">
+        {[["확인한 항목", `${r.done} / ${r.total}`], ...r.axes.map((a) => [a.axis, `${a.items.filter((i) => i.done).length} / ${a.items.length}`])].map(([k, val]) => (
+          <div key={k}>
+            <div className="text-[10.5px] font-bold text-muted">{k}</div>
+            <div className="font-num text-[18px] font-black" style={{ color: NAVY }}>{val}</div>
+          </div>
+        ))}
+        {Object.keys(r.gradeCounts).length > 0 && (
+          <div className="col-span-2 flex flex-wrap items-center gap-1.5 border-t border-navy/[.08] pt-2.5 sm:col-span-4">
+            <span className="text-[10.5px] font-bold text-muted">컨시어지가 고른 상태</span>
+            {VISIT_GRADES.filter((g) => r.gradeCounts[g]).map((g) => (
+              <span key={g} className="rounded-full px-2 py-[2px] text-[11px] font-bold" style={{ background: RESULT_TONE[g].bg, color: RESULT_TONE[g].fg }}>
+                {g} <span className="font-num">{r.gradeCounts[g]}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="avoid-break mt-3 rounded-[14px] px-5 py-3.5" style={{ background: "rgba(176,141,87,.07)", borderLeft: "3px solid #B08D57" }}>
+        <p className="text-[11.5px] leading-[1.8] text-ink">
+          <span className="font-black" style={{ color: NAVY }}>총평 </span>
+          {r.memo || "컨시어지가 남긴 총평이 없습니다."}
+        </p>
+        <p className="mt-1 text-[10.5px] text-muted">현장 사진 {r.photos}장 · 사진 파일은 베타에서 저장하지 않습니다</p>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {r.axes.map((a) => (
+          <div key={a.axis} className="avoid-break rounded-[14px] border border-navy/[.1] px-3.5 py-3">
+            <div className="flex items-center gap-2 border-b-2 pb-1.5" style={{ borderColor: NAVY }}>
+              <span className="flex h-[20px] w-[20px] items-center justify-center rounded-full" style={{ background: NAVY, color: "#fff" }}>
+                <Icon name={a.icon} size={12} strokeWidth={2} />
+              </span>
+              <span className="text-[13px] font-black" style={{ color: NAVY }}>{a.axis}</span>
+              <span className="text-[9px] font-bold text-muted">확인 {a.items.filter((i) => i.done).length} / {a.items.length}</span>
+            </div>
+            <ul className="mt-1">
+              {a.items.map((i) => (
+                <li key={i.k} className="border-b border-navy/[.06] py-1.5 last:border-0">
+                  <div className="flex items-center justify-between gap-2 text-[11.5px]">
+                    <span className="font-bold text-ink">{i.k}</span>
+                    <span
+                      className="shrink-0 rounded-full px-2 py-[1px] text-[10px] font-bold"
+                      style={
+                        i.grade && RESULT_TONE[i.grade]
+                          ? { color: RESULT_TONE[i.grade].fg, background: RESULT_TONE[i.grade].bg }
+                          : i.done
+                            ? { color: "#1E7A5A", background: "rgba(30,122,90,.12)" }
+                            : { color: "#5C5A54", background: "rgba(10,31,60,.06)" }
+                      }
+                    >
+                      {i.grade ? i.grade : i.done ? "확인함" : "이번엔 보지 않음"}
+                    </span>
+                  </div>
+                  {i.note && <div className="mt-0.5 text-[10.5px] leading-[1.6] text-muted">{i.note}</div>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+
+
+      <p className="mt-2 text-[9.5px] leading-[1.6] text-muted">
+        컨시어지 방문 기록 → 관제 검수 → 보호자 발송 · 관찰 기록이며 진단 · 판단이 아닙니다
+        {Object.keys(r.gradeCounts).length > 0 ? " · 상태는 컨시어지가 고른 항목에만 붙습니다" : ""} · 확인하지 않은 항목은 이번 방문에서 보지 않은 것입니다
+      </p>
+    </DocShell>
+  );
+}
+
+// 테스트 계정으로 들어오면 실제 리포트, 아니면 데모 예시 (2026-10-02)
+function VisitReportPage() {
+  const live = !!useAuth().user?.household;
+  return live ? <LiveVisitReport /> : <VisitReport />;
+}
+
+// ── 병원 동행 리포트 (2026-10-02 "남은 것도 다" — 동행 리포트 연동) ──
+// 컨시어지 '동행 기록 저장'(적은 글 · 사진 장수 · 영상 녹화 여부) → '리포트 제출' → 관제 검수 · 보호자 리포트 발송 때 함께 열린다.
+// 적은 글을 그대로 싣는다 — AI 초안 · 진단 · 판정을 붙이지 않는다. 보호자가 처음 열면 관제 커뮤니케이션 · 감사로그에 '열람'.
+const hmDot = (t) => (t ? new Date(Number(t) + 9 * 3600 * 1000).toISOString().slice(11, 16) : "—");
+function LiveEscortReport() {
+  const { state, dispatch } = useAppState();
+  const e = state.escort || {};
+  const { query } = useRouter();
+  const fromFamily = query.from === "family";
+  const sent = !!e.sentAt;
+  const viewed = !!e.viewedAt;
+  const asGuardian = useAuth().user?.role === "guardian";
+  useEffect(() => {
+    if (fromFamily && asGuardian && sent && !viewed) dispatch({ type: "escortViewed" });
+  }, [fromFamily, asGuardian, sent, viewed, dispatch]);
+  const back = { backHref: fromFamily ? "/family/my" : "/concierge", backLabel: fromFamily ? "마이로" : "컨시어지로" };
+  if (!sent)
+    return (
+      <DocShell title="동행 리포트" period="테스트 가구 1 · 전달 전" {...back} docType="escort-live" live={{ stamp: "관제 검수 뒤 전달", canon: "escort-live-pending" }}>
+        <div className="mt-4 rounded-[14px] border border-navy/[.1] px-5 py-6 text-center">
+          <div className="text-[16px] font-black" style={{ color: NAVY }}>동행 리포트가 아직 오지 않았습니다</div>
+          <p className="mt-2 text-[13px] leading-[1.8] text-muted">
+            병원 동행을 마치면 컨시어지가 적은 기록을 확인한 뒤 보내 드립니다.
+            <br />
+            지금 단계: <b className="text-ink">{e.savedAt ? "컨시어지가 동행 기록을 저장했습니다 — 관제 검수 뒤 전달" : "동행 기록 전"}</b>
+          </p>
+        </div>
+      </DocShell>
+    );
+  return (
+    <DocShell
+      title="동행 리포트"
+      period={`${ymdDot(e.savedAt)} 병원 동행 · 테스트 가구 1`}
+      {...back}
+      docType="escort-live"
+      live={{ stamp: `${ymdDot(e.sentAt)} ${hmDot(e.sentAt)} 전달 · 실제 동행 기록`, canon: JSON.stringify({ type: "escort-live", note: e.note, photos: e.photos, recorded: e.recorded, savedAt: e.savedAt, sentAt: e.sentAt }) }}
+    >
+      <div className="avoid-break mt-3 rounded-[14px] px-5 py-4 text-white" style={{ background: NAVY }}>
+        <div className="text-[10px] font-bold tracking-[.08em] text-white/60">케이케어 동행 리포트 · 테스트 가구 1 · 실제 동행 기록</div>
+        <div className="mt-1 flex items-baseline gap-2">
+          <span className="text-[24px] font-black">{LIVE_ELDER}</span>
+          <span className="text-[12px] text-white/75">어르신 · 병원 동행</span>
+        </div>
+        <div className="mt-1 text-[10.5px] leading-[1.7] text-white/70">
+          기록 저장 {ymdDot(e.savedAt)} {hmDot(e.savedAt)} · 담당 컨시어지 {e.by || "—"} · 가족 전달 {hmDot(e.sentAt)}
+        </div>
+      </div>
+      <div className="avoid-break">
+        <SectionTitle>동행 기록 — 컨시어지가 적은 그대로</SectionTitle>
+        <p className="whitespace-pre-wrap rounded-[14px] px-5 py-3.5 text-[12.5px] leading-[1.85] text-ink" style={{ background: "rgba(176,141,87,.07)", borderLeft: "3px solid #B08D57" }}>
+          {e.note}
+        </p>
+      </div>
+      <div className="avoid-break grid grid-cols-1 gap-x-8 sm:grid-cols-2">
+        <KV k="현장 사진" v={`${e.photos || 0}장 · 파일은 베타에서 저장하지 않습니다`} />
+        <KV k="영상 녹화" v={e.recorded ? "녹화함 — 컨시어지 기록" : "녹화하지 않음"} />
+      </div>
+      <p className="mt-3 text-[9.5px] leading-[1.6] text-muted">
+        컨시어지 동행 기록 → 컨시어지 검수 확정 → 보호자 전달 · 의료진 말씀과 현장에서 있었던 일의 기록이며 진단 · 판단이 아닙니다
+      </p>
+    </DocShell>
+  );
+}
+function DemoEscortReport() {
+  return (
+    <DocShell title="동행 리포트" period={`${CARE_TEAM.dateLabel} · 김순자 (78) 가구`} backHref="/family/my" backLabel="마이로" docType="escort">
+      <div className="avoid-break">
+        <SectionTitle>동행 기록 (데모 예시)</SectionTitle>
+        <p className="text-[12.5px] leading-[1.85] text-ink">{AI_REPORT.draft}</p>
+        <p className="mt-2 text-[10.5px] leading-[1.7] text-muted">{AI_REPORT.hitl}</p>
+      </div>
+    </DocShell>
+  );
+}
+function EscortReportPage() {
+  const live = !!useAuth().user?.household;
+  return live ? <LiveEscortReport /> : <DemoEscortReport />;
+}
+
 // ── 경영 월간 리포트 ──
 function ExecReport() {
   return (
@@ -534,7 +757,7 @@ function ExecReport() {
   );
 }
 
-const REPORTS = { care: CareReport, visit: VisitReport, exec: ExecReport };
+const REPORTS = { care: CareReport, visit: VisitReportPage, escort: EscortReportPage, exec: ExecReport };
 
 export default function ReportPage() {
   const { query } = useRouter();
@@ -542,7 +765,7 @@ export default function ReportPage() {
   if (!Comp)
     return (
       <div className="flex min-h-screen items-center justify-center bg-paper text-[14px] text-muted">
-        리포트 준비 중 — /report/care · /report/visit · /report/exec
+        리포트 준비 중 — /report/care · /report/visit · /report/escort · /report/exec
       </div>
     );
   return <Comp />;

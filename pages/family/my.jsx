@@ -28,6 +28,8 @@ const monthlyLabel = (ob) =>
   ob?.tier === 2 ? "별도 산정" : ob?.household === "couple" ? `${fmtWon(HOUSEHOLD.monthly)} · 부부 가구` : fmtWon(PRICING.subscription.monthly);
 import { storageText, useAppState, useSync } from "../../lib/state";
 import { honorific } from "../../lib/tracks";
+import { healthOf } from "../../lib/meds";
+import { HealthSummary } from "../../components/HealthInfo";
 
 // 마이 — 2026-09-04 시트 보호자 마이 1·2번 (첨부 영상 시안대로 재구성).
 //   머리: "OO님, 안녕하세요" + 오른쪽 위 '관리' → 내 정보 수정
@@ -51,9 +53,9 @@ export default function MyPage() {
   const [video, setVideo] = useState(null); // 바디캠 영상 재생 창
   const isPrimary = (state.demo.guardianRole || "primary") === "primary";
   const honor = honorific(ob); // 고객 호칭 — 전부 "~~님" (2026-08-12 시트)
-  // 화면 주인 — 주 보호자(김민수). 온보딩에서 관계만 받고 이름은 받지 않으므로 페르소나를 쓴다.
-  const me = GUARDIANS.find((g) => g.isPrimary) || GUARDIANS[0];
-  const videoConsent = ob ? !!ob.videoConsent : true; // 온보딩 전 데모는 동의로 본다 (컨시어지 화면과 같은 기본값)
+  // 화면 주인 — 데모는 주 보호자 페르소나(김민수). 테스트 계정은 로그인한 계정 이름 (예시 이름을 붙이지 않는다).
+  const me = auth.user?.household ? { name: auth.user.name || "보호자", isPrimary: true } : GUARDIANS.find((g) => g.isPrimary) || GUARDIANS[0];
+  const videoConsent = ob?.joinedAt ? !!ob.videoConsent : true; // 가입 상담 전에는 동의로 본다 (컨시어지 화면과 같은 기본값)
 
   return (
     <>
@@ -98,8 +100,11 @@ export default function MyPage() {
         {/* 안심방문 바디캠 영상 — 리포트와 평가 사이 (시트 마이 2번) */}
         <BodycamCard consent={videoConsent} onOpen={setVideo} />
 
-        {/* 동행 후 만족도 — 리포트 바로 아래 (2026-08-28 시트 홈 2번) */}
+        {/* 동행 후 만족도 — 리포트 바로 아래 (2026-08-28 시트 홈 2번).
+            테스트 가구는 컨시어지가 동행 리포트를 보낸 뒤에만 묻는다 — 없던 동행을 '끝났습니다'라고 하지 않는다 (2026-10-02 UX 점검) */}
+        {(!auth.user?.household || state.escort?.sentAt) && (
         <NpsCard
+          when={auth.user?.household ? new Date(state.escort.sentAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) + " 동행 리포트를 받으셨습니다." : null}
           onEvent={(text, color) => dispatch({ type: "pushEvent", payload: { kind: "CS", text, color } })}
           onDetractor={(score, reason) =>
             dispatch({ type: "opsPatch", patch: { npsDetractor: { score, reason } } })
@@ -107,6 +112,19 @@ export default function MyPage() {
           onReview={(score, text) => dispatch({ type: "addReview", payload: { by: me.name, score, text } })}
           reviews={state.reviews}
         />
+        )}
+
+        {/* 건강 정보 — 복용약 · 질환 · 알레르기 (2026-10-02 QA). 어르신 앱 · 관제 · SOS 신고 정보와 같은 한 벌.
+            보호자는 보기만 한다 — 고치는 것은 첫 안심방문 때 약봉투를 본 컨시어지와 관제다. */}
+        <Card className="p-[18px]">
+          <SectionLabel>{honor} 건강 정보</SectionLabel>
+          <div className="mt-2">
+            <HealthSummary health={healthOf(state)} compact />
+          </div>
+          <p className="mt-2 border-t border-navy/[.08] pt-2 text-[11.5px] leading-[1.6] text-muted">
+            약이 바뀌었으면 해주세요로 알려 주세요 — 담당 컨시어지 · 관제가 고치면 {honor} 복약 알림도 같이 바뀝니다.
+          </p>
+        </Card>
 
         {/* 우선 확인 날씨 — REQ-01 (사람이 설정 · 주체 기록) */}
         <Card className="p-[18px]">
@@ -339,7 +357,7 @@ export default function MyPage() {
             }}
           />
         )}
-        {escortOpen && <EscortReportSheet onClose={() => setEscortOpen(false)} />}
+        {escortOpen && <EscortReportSheet live={!!auth.user?.household} escort={state.escort} onClose={() => setEscortOpen(false)} />}
         {video && <VideoSheet video={video} onClose={() => setVideo(null)} />}
       </FamilyLayout>
     </>
@@ -347,7 +365,7 @@ export default function MyPage() {
 }
 
 function payLabel(ob, honor) {
-  if (!ob || ob.paymentMode === "limit") return `${fmtWon(ob?.limitAmount ?? PRICING.paymentLimitDefault)} 이하 ${honor} 직접 결제`;
+  if (!ob || ob.paymentMode === "limit") return `하루 ${fmtWon(ob?.limitAmount ?? PRICING.paymentLimitDefault)}까지 ${honor} 직접 결제`;
   return { both: "양쪽 모두 결제", guardianOnly: "보호자만 결제", elderOnly: `${honor}만 결제` }[ob.paymentMode];
 }
 
@@ -492,20 +510,52 @@ function VideoSheet({ video, onClose }) {
 }
 
 // ── 동행 리포트 발급 — 타일 1 ──
-// 동행 완료 리포트는 AI 초안 → 컨시어지 확정 → 2인 서명 뒤에만 나간다 (lib/mock.js AI_REPORT).
-function EscortReportSheet({ onClose }) {
+// 동행 완료 리포트는 컨시어지가 적고 검수 확정한 뒤에만 나간다 (2인 서명은 2026-08-12 삭제).
+// 테스트 계정이면 컨시어지가 실제로 적은 동행 기록(state.escort)을 보여 준다 (2026-10-02).
+function EscortReportSheet({ onClose, live = false, escort = null }) {
   const [issued, setIssued] = useState(false);
+  if (live) {
+    const e = escort || {};
+    const day = (t) => new Date(t).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" });
+    const hm = (t) => new Date(t).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+    return (
+      <Sheet label="동행 리포트" onClose={onClose}>
+        <div className="text-[19px] font-black text-navy">동행 리포트</div>
+        {e.sentAt ? (
+          <>
+            <div className="mt-1 text-[12px] text-muted">
+              {day(e.savedAt || e.sentAt)} 병원 동행 · 담당 컨시어지 {e.by || "—"} · 전달 {hm(e.sentAt)}
+            </div>
+            <p className="mt-3 line-clamp-6 whitespace-pre-wrap rounded-xl bg-navy/[.04] px-3.5 py-3 text-[14px] leading-[1.75] text-ink">{e.note}</p>
+            <div className="mt-2 text-[12px] text-muted">
+              현장 사진 {e.photos || 0}장 · 영상 {e.recorded ? "녹화함" : "녹화하지 않음"}
+            </div>
+            <Link
+              href="/report/escort?from=family"
+              className="btn-press mt-4 block w-full rounded-xl border border-navy bg-navy py-3.5 text-center text-[16px] font-bold text-white"
+            >
+              리포트 전체 보기 · PDF 저장
+            </Link>
+          </>
+        ) : (
+          <p className="mt-3 rounded-xl bg-navy/[.04] px-3.5 py-3 text-[14px] leading-[1.75] text-ink">
+            아직 받은 동행 리포트가 없습니다. 병원 동행을 마치면 컨시어지가 적은 기록을 확인한 뒤 여기로 보내 드립니다.
+            {e.savedAt ? " (컨시어지가 기록을 저장했습니다 — 관제 검수 뒤 전달)" : ""}
+          </p>
+        )}
+        <GhostButton className="mt-2" onClick={onClose}>
+          닫기
+        </GhostButton>
+      </Sheet>
+    );
+  }
   return (
     <Sheet label="동행 리포트" onClose={onClose}>
       <div className="text-[19px] font-black text-navy">동행 리포트</div>
       <div className="mt-1 text-[12px] text-muted">{CARE_TEAM.dateLabel} · 서울아산 순환기내과 · {CARE_TEAM.members.map((m) => m.name).join(" · ")}</div>
       <p className="mt-3 rounded-xl bg-navy/[.04] px-3.5 py-3 text-[14px] leading-[1.75] text-ink">{AI_REPORT.draft}</p>
       <div className="mt-2.5 flex flex-wrap gap-1.5">
-        {CARE_TEAM.members.map((m) => (
-          <span key={m.name} className="rounded-full bg-green/10 px-2.5 py-1 text-[11px] font-bold text-green">
-            ✓ {m.name} 서명
-          </span>
-        ))}
+        <span className="rounded-full bg-green/10 px-2.5 py-1 text-[11px] font-bold text-green">✓ 컨시어지 검수 확정</span>
       </div>
       <p className="mt-2.5 text-[11px] leading-[1.7] text-muted">{AI_REPORT.hitl}</p>
       <button
@@ -569,8 +619,18 @@ function PaySheet({ ob, honor, isPrimary, onClose, onSave, billing, payments = [
         </Link>
       </div>
 
-      {/* 가입·설치비 — 최초 1회. 결제 기록이 없을 때만 보인다 (상담 뒤 결제하는 흐름) */}
-      {!payments.some((p) => p.kind === "entry") && (
+      {/* 가입·설치비 — 최초 1회. 결제 기록이 없을 때만 보인다 (상담 뒤 결제하는 흐름).
+          금액이 확정 전이면(2026-10-02 케어박스 제외) 결제 버튼 대신 '확정 전' 안내만 둔다 */}
+      {!payments.some((p) => p.kind === "entry") && PRICING.entryFee.total == null && (
+        <div className="mt-4">
+          <SectionLabel>가입 및 설치비</SectionLabel>
+          <div className="mt-2 rounded-xl border border-navy/15 bg-white/70 p-3.5">
+            <span className="block text-[14px] font-bold text-navy">확정 전 — 배정 상담에서 안내드립니다</span>
+            <span className="mt-0.5 block text-[12px] leading-[1.5] text-muted">갤럭시 Fit3 · 최초 21항목 점검 · 앱 설치 (최초 1회)</span>
+          </div>
+        </div>
+      )}
+      {!payments.some((p) => p.kind === "entry") && PRICING.entryFee.total != null && (
         <div className="mt-4">
           <SectionLabel>가입 및 설치비</SectionLabel>
           <Link
@@ -584,7 +644,7 @@ function PaySheet({ ob, honor, isPrimary, onClose, onSave, billing, payments = [
               <span className="min-w-0 flex-1">
                 <span className="block text-[14px] font-bold text-navy">{fmtWon(PRICING.entryFee.total)} 결제하기</span>
                 <span className="block text-[12px] leading-[1.5] text-muted">
-                  갤럭시 Fit3 · 케어박스 · 최초 21항목 점검 · 앱 설치 (최초 1회)
+                  갤럭시 Fit3 · 최초 21항목 점검 · 앱 설치 (최초 1회)
                 </span>
               </span>
               <span aria-hidden className="shrink-0 text-muted">›</span>
@@ -635,7 +695,7 @@ function PaySheet({ ob, honor, isPrimary, onClose, onSave, billing, payments = [
                 <div className="mt-0.5 text-[12px] leading-[1.6] text-muted">{m.desc}</div>
                 {m.key === "limit" && on && (
                   <div className="mt-2 flex items-center gap-2">
-                    <span className="text-[12px] text-muted">한도</span>
+                    <span className="text-[12px] text-muted">하루 한도</span>
                     {[30000, 50000, 100000].map((v) => (
                       <button
                         key={v}
@@ -813,7 +873,7 @@ function PrioritySheet({ current, onClose, onSave, honor }) {
 }
 
 // 동행 후 만족도 — NPS 루프: 0–10 선택 → 비추천(≤6)은 사유 + 24h 회복 안내
-function NpsCard({ onEvent, onDetractor, onReview, reviews = [] }) {
+function NpsCard({ onEvent, onDetractor, onReview, reviews = [], when = null }) {
   const [score, setScore] = useState(null);
   const [reason, setReason] = useState(null);
   const [done, setDone] = useState(false);
@@ -893,7 +953,7 @@ function NpsCard({ onEvent, onDetractor, onReview, reviews = [] }) {
     <Card className="p-[18px]">
       <SectionLabel>오늘 동행은 어떠셨나요?</SectionLabel>
       <p className="mt-1.5 text-[12px] leading-[1.6] text-muted">
-        13:50 서울아산 동행이 끝났습니다. 남겨 주신 점수가 케어 품질 평가 기준이 됩니다.
+        {when || "지난 서울아산 동행이 끝났습니다."} 남겨 주신 점수가 케어 품질 평가 기준이 됩니다.
       </p>
       {/* 점수 — 슬라이더 (2026-08-21 시안). step=1 로 정수에만 멈춘다.
           NPS 는 정수 0~10 이라야 추천(9·10) / 중립(7·8) / 비추천(0~6) 분류가 성립하고,

@@ -28,7 +28,7 @@ function Tile({ title, right, children }) {
   );
 }
 
-export default function VisitDetail({ visit: v, onChange, openProfile }) {
+export default function VisitDetail({ visit: v, onChange, openProfile, escort = null, submitted = false, onEscortSend }) {
   const [showAll, setShowAll] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [svcOpen, setSvcOpen] = useState(false);
@@ -65,7 +65,7 @@ export default function VisitDetail({ visit: v, onChange, openProfile }) {
 
   const subs = [
     v.checkin ? `GPS 체크인 ${v.checkin.at}` : "GPS 체크인 전",
-    `${done}/${total} 점검${v.status === "done" && v.pending.length ? ` · 선택 ${v.pending.length}개 미점검` : ""}`,
+    `${done}/${total} 점검${v.status === "done" && v.pending.length ? ` · ${missing.length ? `필수 ${missing.length}개 · ` : ""}미점검 ${v.pending.length}개` : ""}`,
     "고객(또는 동석 보호자) 확인",
     `관제 검수 · ${v.review}`,
     v.stepIdx === 5 ? `보호자 ${v.viewed}${v.sentAt ? ` · 발송 ${v.sentAt}` : ""}` : "보고서 발송 전",
@@ -243,13 +243,31 @@ export default function VisitDetail({ visit: v, onChange, openProfile }) {
           {v.live && v.status === "active" && (
             <>
               <Btn ghost tone="info" onClick={() => { onChange({ interimAt: clock() }); setMsg(`보호자 중간 알림 발송 ${stampNow()} · 점검 ${done}/${total}`); }}>보호자에게 중간 알림</Btn>
-              <span className="self-center text-[12px] text-muted">점검 완료 · 리포트는 컨시어지 앱의 '검수 확정 후 가족에게 전달'로 넘어옵니다</span>
+              <span className="self-center text-[12px] text-muted">점검이 끝나면 컨시어지 앱의 '리포트 제출'로 넘어옵니다</span>
             </>
           )}
-          {v.status === "done" && v.review === "검수 대기" && <Btn className="ml-auto" tone="info" onClick={() => setConfirm("approve")}>관제 검수 승인</Btn>}
+          {/* 필수 항목이 빠진 리포트는 검수 승인 · 발송을 막는다 (2026-10-02 QA "필수 항목이 빠져도 검수 승인 · 발송이 됨") */}
+          {v.status === "done" && v.review === "검수 대기" && missing.length > 0 && (
+            <div className="w-full"><Note tone="warn">필수 점검 {missing.length}개 미점검 — {missing.join(" · ")}. 컨시어지가 점검을 마쳐야 검수 승인 · 보호자 발송을 할 수 있습니다.</Note></div>
+          )}
+          {v.status === "done" && v.review === "검수 대기" && <Btn className="ml-auto" tone="info" disabled={missing.length > 0} title={missing.length ? "필수 항목 미점검 — 검수 승인 불가" : undefined} onClick={() => setConfirm("approve")}>관제 검수 승인</Btn>}
           {v.status === "done" && v.review === "검수 완료" && v.stepIdx < 5 && <Btn className="ml-auto" onClick={() => setConfirm("send")}>보호자 리포트 발송</Btn>}
           {v.status === "done" && v.stepIdx === 5 && v.viewed === "미열람" && <Btn className="ml-auto" ghost tone="warn" onClick={() => setMsg(`보호자 미열람 재알림 발송 ${stampNow()}`)}>미열람 재알림</Btn>}
         </div>
+        {/* 병원 동행 기록 — 방문 21항목과 따로 검토 · 발송한다. 동행만 있는 날은 필수 점검이 없으므로 여기서 바로 보낸다 */}
+        {escort?.savedAt && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-navy/[.08] bg-white/60 px-3 py-2.5 text-[12.5px]">
+            <span className="font-bold text-navy">병원 동행 기록</span>
+            <span className="text-muted">
+              컨시어지 저장{escort.photos ? ` · 사진 ${escort.photos}장` : ""}{escort.recorded ? " · 영상 녹화" : ""}
+              {escort.sentAt ? " · 보호자에게 발송됨" : submitted ? " · 제출됨 — 관제 확인 대기" : " · 컨시어지 제출 전"}
+              {escort.viewedAt ? " · 보호자 열람" : ""}
+            </span>
+            {!escort.sentAt && submitted && (
+              <Btn small className="ml-auto" onClick={() => { onEscortSend?.(); setMsg(`동행 리포트 보호자 발송 ${stampNow()}`); }}>동행 리포트 발송</Btn>
+            )}
+          </div>
+        )}
         {msg && <div className="mt-2"><Note tone="ok">{msg}</Note></div>}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted">
           <span className="inline-flex items-center gap-1">관제 검수 <Pill tone={REVIEW_TONE[v.review] || "muted"}>{v.review}</Pill>{v.reviewedAt && <Stamp at={v.reviewedAt} prefix="검수" />}</span>

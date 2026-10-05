@@ -4,7 +4,8 @@
 import { useState } from "react";
 import { Btn, Confirm, Empty, Field, KV, Pill, Toggle, TONE } from "../ui";
 import { CALL_RESULTS } from "../../../lib/ops-sos";
-import { dispatchCandidates, getHealth, liveCustomer, telHref } from "../../../lib/ops-health";
+import { LIVE_ELDER, dispatchCandidates, liveCustomer, liveHealth, telHref } from "../../../lib/ops-health";
+import { useAuth } from "../../../lib/auth";
 import { useAppState } from "../../../lib/state";
 import { fmtClock, fmtTime } from "../../../lib/ops-time";
 import { build119, guardianOf, summary119Text } from "./helpers";
@@ -112,7 +113,8 @@ const AGENCIES = ["서울종합방재센터 119", "강동소방서", "강남소�
 const TRANSFER_OPTS = ["미정", "이송", "현장 처치 후 미이송"];
 
 function Report119Form({ inc, c, api, ro }) {
-  const rows = build119(inc, c, getHealth(inc.customer));
+  const live = !!useAuth().user?.household;
+  const rows = build119(inc, c, liveHealth(inc.customer, useAppState()?.state?.onboarding, live));
   const [f, setF] = useState({ at: fmtTime(Date.now()), reporter: inc.controller || "김태영", caseNo: "", agency: AGENCIES[0], content: `${c.name}(${c.age}세) ${inc.cause} · ${inc.value} · 본인 통화 미연결`, eta: "", arrivedAt: "", transferred: "미정", hospital: "", request: "" });
   const set = (k) => (v) => setF({ ...f, [k]: v });
   const id = `${inc.id}-119`;
@@ -150,6 +152,7 @@ function Report119Form({ inc, c, api, ro }) {
 
 // 6-5 파견 — 가장 가까운 출동 가능 인원을 먼저 보이되 실제 파견은 Confirm 을 거친다
 export function DispatchForm({ inc, c, api, ro, compact = false }) {
+  const app = useAppState();
   const cands = dispatchCandidates(c.district);
   const [two, setTwo] = useState({});
   const [pick, setPick] = useState(null);
@@ -197,7 +200,14 @@ export function DispatchForm({ inc, c, api, ro, compact = false }) {
         tone="danger"
         onCancel={() => setPick(null)}
         onConfirm={() => {
-          api.setStep(inc.id, "dispatch", { result: "done", dispatch: { name: pick.name, two: !!two[pick.name], orderedAt: Date.now(), acceptedAt: null, departedAt: null, arrivedAt: null, actions: "", accompany: false, etaMin: pick.etaMin, distKm: pick.distKm } });
+          // 테스트 가구 김순자 님 SOS 에 박지현(테스트 컨시어지 계정)을 보내면 가구 기록에도 급파를 남긴다 —
+          // 그래야 컨시어지 폰에 '급파 수락' 배너가 뜨고, 수락하면 그 시각이 여기 '수락' 칸에 붙는다 (2026-10-02).
+          const live = inc.customer === LIVE_ELDER && pick.name === "박지현" && app?.state?.demo?.sos;
+          api.setStep(inc.id, "dispatch", { result: "done", dispatch: { name: pick.name, two: !!two[pick.name], orderedAt: Date.now(), acceptedAt: live ? app.state.ops?.sosAcceptedAt || null : null, departedAt: null, arrivedAt: null, actions: "", accompany: false, etaMin: pick.etaMin, distKm: pick.distKm } });
+          if (live && !app.state.ops?.sosDispatched) {
+            app.dispatch({ type: "opsPatch", patch: { sosDispatched: true } });
+            app.dispatch({ type: "pushEvent", payload: { kind: "대응", text: `${pick.name} 급파 지시 (SOS 센터) · 도착 예정 ${pick.etaMin}분`, color: "#FF8A80" } });
+          }
           setPick(null);
         }}
       />
@@ -268,7 +278,8 @@ function TransferForm({ inc, c, api, ro }) {
 }
 
 export default function StepForm({ inc, stepKey, api, role }) {
-  const c = liveCustomer(inc.customer, useAppState()?.state?.onboarding);
+  const appState = useAppState()?.state;
+  const c = liveCustomer(inc.customer, appState?.onboarding, appState?.health);
   const rec = inc.steps?.[stepKey] || {};
   const ro = role !== "controller";
   const main = guardianOf(c, "주");

@@ -2,11 +2,80 @@
 // 종료 후에는 발생~종료 기록을 시간순으로 자동 정리하고 보호자 전달용 문구 초안을 만든다.
 import { useState } from "react";
 import { Btn, Confirm, Field, KV, Note, Pill, Table, TONE } from "../ui";
-import { CLOSE_RESULTS } from "../../../lib/ops-sos";
+import { CLOSE_RESULTS, STEP_INDEX, STEP_ORDER } from "../../../lib/ops-sos";
 import { liveCustomer } from "../../../lib/ops-health";
 import { useAppState } from "../../../lib/state";
 import { fmtDateTime, fmtDur, fmtTime } from "../../../lib/ops-time";
 import { buildTimeline } from "./helpers";
+
+// 어느 단계에서든 해결 완료 (2026-10-05 현장 요청: "1차에서 처리완료될 수도, 2차에서 처리완료될 수도 있는데
+// 끝까지 해결할 수 있는 기능이 없어 단계별로 해결되면 해결완료 할 수 있게"). 해결한 단계에 '완료'를 남기고,
+// 그 뒤 남은 단계는 '건너뜀 — ○○에서 해결'로 닫은 다음 사건을 종료한다. 상황보고서는 그대로 만들어진다.
+// 실제 앱의 SOS(김순자 댁)로 열린 사건을 끝내면 어르신 · 보호자 · 컨시어지 화면의 SOS 알림도 같이 끈다
+function useReleaseSos() {
+  const ctx = useAppState();
+  return (inc, result) => {
+    if (!ctx?.state?.demo?.sos || inc.customer !== "김순자") return;
+    ctx.dispatch({ type: "ackSos" });
+    ctx.dispatch({ type: "pushEvent", payload: { kind: "대응", text: `SOS 사건 종료 — ${result || "해결 완료"} · 어르신 · 가족 앱 알림 해제`, color: "#8FE3C0" } });
+  };
+}
+const titleOf = (k) => STEP_ORDER.find((s) => s.k === k)?.title || k;
+const defaultResult = (k) =>
+  k === "confirm" ? "단순 오작동" : ["dispatch", "arrive"].includes(k) ? "현장 조치 완료" : k === "transfer" ? "보호자 인계" : "정상 확인";
+// 해결한 단계 — 마지막으로 결과가 남은 단계(예: 1차 전화 '연결'), 없으면 지금 단계
+export function resolveStepOf(inc) {
+  // 실제로 해결이 가능했던 결과만 — 미연결 · 거절 · 통화불가 단계에서 '해결'했다고 적지 않는다
+  const done = STEP_ORDER.filter((s) => !["close", "report"].includes(s.k) && ["connected", "done"].includes(inc.steps?.[s.k]?.result));
+  return done.length ? done[done.length - 1].k : inc.step;
+}
+export function ResolvePanel({ inc, api, role, stepKey, by = "김태영", onDone, onCancel }) {
+  const ro = role !== "controller";
+  const at = stepKey || resolveStepOf(inc);
+  const [result, setResult] = useState(defaultResult(at));
+  const [outcome, setOutcome] = useState(inc.steps?.[at]?.answer ? `${titleOf(at)} — ${inc.steps[at].answer}` : "");
+  const [ask, setAsk] = useState(false);
+  const releaseSos = useReleaseSos();
+  return (
+    <div className="rounded-xl border border-green/30 bg-green/[.05] p-3">
+      <div className="text-[13px] font-bold text-green">{titleOf(at)} 단계에서 해결 완료</div>
+      <p className="mt-0.5 text-[12px] leading-[1.6] text-muted">남은 단계는 &lsquo;건너뜀 — {titleOf(at)}에서 해결&rsquo;로 닫히고 사건이 종료됩니다. 상황보고서는 그대로 정리됩니다.</p>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Field id={`${inc.id}-resolve-result`} label="종료 결과" value={result} onChange={setResult} options={CLOSE_RESULTS} disabled={ro} required />
+        <Field id={`${inc.id}-resolve-outcome`} label="해결 내용" value={outcome} onChange={setOutcome} placeholder="예: 1차 통화 연결 · 잠깐 어지러웠다 하심 · 이상 없음" disabled={ro} required />
+      </div>
+      <div className="mt-2.5 flex justify-end gap-2">
+        {onCancel && <Btn ghost small tone="muted" onClick={onCancel}>닫기</Btn>}
+        <Btn small tone="ok" disabled={ro || !result || !outcome.trim()} onClick={() => setAsk(true)}>해결 완료 · 사건 종료</Btn>
+      </div>
+      <Confirm
+        open={ask}
+        title={`${titleOf(at)} 단계에서 해결하고 ${inc.id} 사건을 종료합니다`}
+        body={`결과 “${result}” · ${outcome.trim()}. 남은 단계는 건너뜀으로 남고, 종료는 이력에 남습니다 (재개는 별도 기록).`}
+        confirmLabel="해결 완료"
+        tone="navy"
+        onCancel={() => setAsk(false)}
+        onConfirm={() => {
+          const now = Date.now();
+          const idx = STEP_INDEX[at] ?? 0;
+          const steps = { ...(inc.steps || {}) };
+          // 지운 기록이 없게 합친다 — 시도 횟수 · 메모 · 파견 기록은 그대로 두고 결과 · 메모 한 줄만 더한다
+          const join = (prev, add) => (prev ? `${prev} · ${add}` : add);
+          if (!steps[at]?.result) steps[at] = { ...(steps[at] || {}), at: steps[at]?.at ?? now, by: steps[at]?.by ?? by, result: "done", memo: join(steps[at]?.memo, `해결 — ${outcome.trim()}`) };
+          STEP_ORDER.forEach((s, i) => {
+            if (i > idx && !["close", "report"].includes(s.k) && !steps[s.k]?.result)
+              steps[s.k] = { ...(steps[s.k] || {}), at: steps[s.k]?.at ?? now, by: steps[s.k]?.by ?? by, result: "skip", memo: join(steps[s.k]?.memo, `${titleOf(at)}에서 해결 — 진행하지 않음`) };
+          });
+          api.update(inc.id, { steps });
+          api.close(inc.id, { result, reason: `${titleOf(at)} 단계에서 해결`, outcome: outcome.trim(), by });
+          releaseSos(inc, result);
+          setAsk(false);
+          onDone?.();
+        }}
+      />
+    </div>
+  );
+}
 
 export function CloseForm({ inc, api, role }) {
   const [result, setResult] = useState("");
@@ -15,6 +84,7 @@ export function CloseForm({ inc, api, role }) {
   const [ask, setAsk] = useState(false);
   const ro = role !== "controller";
   const valid = result && reason.trim() && outcome.trim();
+  const releaseSos = useReleaseSos();
   return (
     <div className="card-glass rounded-xl p-3">
       {ro && <div className="mb-2"><Note tone="warn">조회 전용 권한은 사건을 종료할 수 없습니다. 담당 관제사(김태영)에게 종료를 요청하세요.</Note></div>}
@@ -36,6 +106,7 @@ export function CloseForm({ inc, api, role }) {
         onCancel={() => setAsk(false)}
         onConfirm={() => {
           api.close(inc.id, { result, reason: reason.trim(), outcome: outcome.trim(), by: "김태영" });
+          releaseSos(inc, result);
           setAsk(false);
         }}
       />
@@ -60,7 +131,8 @@ function draftForGuardian(inc, c, timeline) {
 }
 
 export function ReportView({ inc, api, role }) {
-  const c = liveCustomer(inc.customer, useAppState()?.state?.onboarding);
+  const appState = useAppState()?.state;
+  const c = liveCustomer(inc.customer, appState?.onboarding, appState?.health);
   const timeline = buildTimeline(inc);
   const [draft, setDraft] = useState(() => draftForGuardian(inc, c, timeline));
   const [copied, setCopied] = useState(false);

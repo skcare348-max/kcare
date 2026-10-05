@@ -18,8 +18,10 @@ const VOICE_CONTEXT = { 안부: "안부 음성", 긴급: "긴급 음성", 마음
 
 function rowsOf(state) {
   const played = state.elder?.msgPlayed || {};
+  const guardianHeard = state.guardian?.voiceHeard || {};
   const voices = (state.voices || []).map((v) => {
     const toElder = v.to === ELDER.name || v.to === `${ELDER.name} 님`;
+    const toGuardian = v.to === "아들 민수" || v.to === "가족 모두";
     return {
       id: `v-${v.id}`,
       at: v.at,
@@ -27,8 +29,8 @@ function rowsOf(state) {
       from: v.from === "컨시어지" ? "컨시어지 박지현" : v.from,
       to: v.to === "컨시어지" ? "컨시어지 박지현" : v.to,
       text: `${VOICE_CONTEXT[v.context] || v.context || "음성"} · ${Number(v.secs) || 0}초${v.title && v.title !== "선생님께 보낸 목소리" ? ` · ${v.title}` : ""}`,
-      state: toElder ? (played[v.id] ? "어르신 청취" : "미청취") : "전달됨",
-      tone: toElder && !played[v.id] ? "warn" : "ok",
+      state: toElder ? (played[v.id] ? "어르신 청취" : "미청취") : toGuardian ? (guardianHeard[v.id] ? "보호자 청취" : "보호자 미청취") : "전달됨",
+      tone: (toElder && !played[v.id]) || (toGuardian && !guardianHeard[v.id]) ? "warn" : "ok",
     };
   });
   const ops = (state.opsMessages || []).map((m) => ({
@@ -90,7 +92,7 @@ export default function LiveComms() {
     ["", "오늘 연락", rows.filter((r) => day(r.at) === today).length, "navy"],
     ["voice", "음성 메시지", rows.filter((r) => r.ch === "voice").length, "info"],
     ["ops", "관제 연락", rows.filter((r) => r.ch === "ops").length, "warn"],
-    ["open", "확인 전", rows.filter((r) => r.open).length, "danger"],
+    ["open", "확인 전", rows.filter((r) => r.open).length, "warn"],
     ["ask", "어르신 부탁", rows.filter((r) => r.ch === "ask").length, "gold"],
   ];
 
