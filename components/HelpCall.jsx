@@ -13,9 +13,10 @@ import { useAuth } from "../lib/auth";
 import { CLOSED, isVisitCall } from "../lib/requests";
 import { scopedKey } from "../lib/scope";
 import { ringAlarm } from "../lib/alarm";
-import { ELDER } from "../lib/mock";
+import { ELDER, elderWho } from "../lib/mock";
 import { LIVE_CONCIERGE } from "../lib/live-household";
 import { CONCIERGES } from "../lib/ops-admin";
+import { conciergeChoices, meAs } from "../lib/people";
 
 const RECENT_MS = 12 * 3600 * 1000; // 끝난 도와줘요도 12시간은 팝업 · 카드에 남긴다 (결과를 알려야 하므로)
 const lastAt = (r) => r.history?.[r.history.length - 1]?.at || 0;
@@ -77,10 +78,12 @@ function Timeline({ r, from = 0 }) {
 // 보호자 · 컨시어지 팝업 — 새 도와줘요 · 관제 처리 단계마다 뜬다
 export function HelpCallPopup({ role }) {
   const { state } = useAppState();
+  // 이 기기의 컨시어지 이름 — 센터 공간에서 컨시어지가 여럿이면 로그인한 사람 (2026-10-06 점검)
+  const me = meAs(useAuth().user, "concierge");
   const [seen, mark] = useSeen(role);
   const calls = helpCalls(state.requests);
   // 내가 한 단계(컨시어지의 현장 도착 · 처리 완료)는 나에게 다시 띄우지 않는다 — 다음 버튼을 가린다
-  const fromOthers = (h) => !(role === "concierge" && h.by === LIVE_CONCIERGE);
+  const fromOthers = (h) => !(role === "concierge" && h.by === me);
   const pending = seen ? calls.find((r) => (r.history || []).slice(seen[r.id] || 0).some(fromOthers)) : null;
   const rang = useRef("");
   useEffect(() => {
@@ -93,7 +96,7 @@ export function HelpCallPopup({ role }) {
   if (!pending) return null;
   const from = seen[pending.id] || 0;
   const first = from === 0;
-  const mine = role === "concierge" && pending.status === "inProgress" && pending.assignee === LIVE_CONCIERGE;
+  const mine = role === "concierge" && pending.status === "inProgress" && pending.assignee === me;
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[rgba(8,23,45,.55)] p-4">
       <div role="alertdialog" aria-modal="true" aria-label="도와줘요 알림" className="w-full max-w-[400px] rounded-[22px] bg-white p-5 shadow-xl" style={{ borderTop: "6px solid #B08D57" }}>
@@ -183,6 +186,9 @@ export function HelpCallOps({ openId, onClose }) {
   const r = (openId && calls.find((x) => x.id === openId)) || auto;
   const [memo, setMemo] = useState("");
   const [who, setWho] = useState(LIVE_CONCIERGE);
+  // 센터 공간은 그 센터 컨시어지만 — 아직 승인된 컨시어지가 없으면 출동 지시를 막는다 (자리 이름을 담당으로 저장하지 않게)
+  const choices = conciergeChoices(CONCIERGES);
+  const pick = choices.includes(who) ? who : choices[0] || "";
   const rang = useRef("");
   useEffect(() => {
     if (!auto || rang.current === auto.id) return;
@@ -212,7 +218,7 @@ export function HelpCallOps({ openId, onClose }) {
           <span className="ml-auto rounded-full bg-gold/20 px-2.5 py-[3px] text-[12px] font-bold text-[#8A5D12]">{HELP_STAGE[r.status]}</span>
         </div>
         <div className="mt-1 text-[22px] font-black text-navy">
-          {ELDER.name} ({ELDER.age}) 님이 도와줘요를 눌렀습니다
+          {elderWho(" ")} 님이 도와줘요를 눌렀습니다
         </div>
         <p className="mt-1 text-[13px] text-muted">어르신 화면 · {hm(r.history[0].at)} 접수 — 확인 전화부터. 어느 단계에서든 해결되면 해결 완료로 닫습니다.</p>
 
@@ -252,11 +258,13 @@ export function HelpCallOps({ openId, onClose }) {
               <div className="mt-2 flex gap-2">
                 <select
                   aria-label="출동할 컨시어지"
-                  value={who}
+                  value={pick}
+                  disabled={!choices.length}
                   onChange={(e) => setWho(e.target.value)}
                   className="flex-1 rounded-lg border border-navy/15 bg-white px-3 py-2.5 text-[14px] text-ink"
                 >
-                  {CONCIERGES.map((c) => (
+                  {!choices.length && <option value="">승인된 컨시어지 없음</option>}
+                  {choices.map((c) => (
                     <option key={c} value={c}>
                       {c}
                       {c === LIVE_CONCIERGE ? " (담당)" : ""}
@@ -264,13 +272,16 @@ export function HelpCallOps({ openId, onClose }) {
                   ))}
                 </select>
                 <button
-                  disabled={r.status === "inProgress" && r.assignee === who}
-                  onClick={() => act("dispatch", { assignee: who })}
+                  disabled={!pick || (r.status === "inProgress" && r.assignee === pick)}
+                  onClick={() => act("dispatch", { assignee: pick })}
                   className="btn-press rounded-xl bg-navy px-4 py-2.5 text-[13px] font-bold text-white disabled:opacity-40"
                 >
                   {r.status === "inProgress" ? "다시 지시" : "출동 지시"}
                 </button>
               </div>
+              {!choices.length && (
+                <p className="mt-1.5 text-[12px] leading-[1.6] text-muted">이 센터에 승인된 컨시어지가 없습니다 — 회원 · 권한에서 승인하면 고를 수 있습니다.</p>
+              )}
             </div>
 
             <div className="mt-4">

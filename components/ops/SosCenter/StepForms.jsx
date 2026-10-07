@@ -5,6 +5,8 @@ import { useState } from "react";
 import { Btn, Confirm, Empty, Field, KV, Pill, Toggle, TONE } from "../ui";
 import { CALL_RESULTS } from "../../../lib/ops-sos";
 import { LIVE_ELDER, dispatchCandidates, liveCustomer, liveHealth, telHref } from "../../../lib/ops-health";
+import { LIVE_CONCIERGE } from "../../../lib/live-household";
+import { inCenter, people } from "../../../lib/people";
 import { useAuth } from "../../../lib/auth";
 import { useAppState } from "../../../lib/state";
 import { fmtClock, fmtTime } from "../../../lib/ops-time";
@@ -35,13 +37,16 @@ function Tries({ tries }) {
 function ContactForm({ inc, stepKey, rec, api, ro, target, phone, channels, withRequest, allowSkip, nextDefault }) {
   // '전화 걸기'는 시도를 기록하고 실제 전화 앱도 연다 (2026-10-02 — 관제가 번호를 보고 바로 건다)
   const dial = telHref(phone);
-  const [result, setResult] = useState("미연결");
+  // 결과는 관제사가 직접 고른다 — 미리 '미연결'이 골라져 있으면 연결된 통화를 미연결로 저장하기 쉽다 (2026-10-05 점검)
+  const [result, setResult] = useState("");
   const [answer, setAnswer] = useState("");
   const [request, setRequest] = useState("");
   const [next, setNext] = useState(nextDefault || "");
   const [memo, setMemo] = useState("");
   const id = `${inc.id}-${stepKey}`;
   const logTry = (ch) => api.setStep(inc.id, stepKey, { try: { result: "dialing", note: `${ch} · ${target}` } }, { advance: false });
+  // 연결됐으면 '미연결 시 ○○' 같은 기본 다음 조치 문구는 남기지 않는다
+  const save = () => api.setStep(inc.id, stepKey, { result: keyOf(result), answer, request, next: result === "연결" && next === nextDefault ? "" : next, memo });
   return (
     <div className="card-glass rounded-xl p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -58,7 +63,7 @@ function ContactForm({ inc, stepKey, rec, api, ro, target, phone, channels, with
         <Tries tries={rec.tries} />
       </div>
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Field id={`${id}-result`} label="결과" value={result} onChange={setResult} options={RESULT_LABELS} disabled={ro} required />
+        <Field id={`${id}-result`} label="결과" value={result} onChange={setResult} options={["", ...RESULT_LABELS]} disabled={ro} required />
         <Field id={`${id}-answer`} label="상대방 답변" value={answer} onChange={setAnswer} placeholder="예: 어지러워 누워 있다고 함" disabled={ro} />
         {withRequest && <Field id={`${id}-request`} label="보호자 요청사항" value={request} onChange={setRequest} placeholder="예: 119 부르지 말고 먼저 컨시어지 방문 요청" disabled={ro} />}
         <Field id={`${id}-next`} label="다음 조치" value={next} onChange={setNext} disabled={ro} />
@@ -66,7 +71,8 @@ function ContactForm({ inc, stepKey, rec, api, ro, target, phone, channels, with
       </div>
       <div className="mt-3 flex flex-wrap justify-end gap-2">
         {allowSkip && <Btn ghost small tone="muted" disabled={ro} onClick={() => api.setStep(inc.id, stepKey, { result: "skip", memo: memo || "해당 없음" })}>건너뛰기</Btn>}
-        <Btn small disabled={ro} onClick={() => api.setStep(inc.id, stepKey, { result: keyOf(result), answer, request, next, memo })}>결과 저장 · 다음 단계</Btn>
+        <Btn ghost small tone="ok" disabled={ro || !result} title={!result ? "통화 결과를 먼저 고릅니다" : undefined} onClick={() => { save(); api.resolveHere?.(stepKey); }}>저장하고 여기서 해결</Btn>
+        <Btn small disabled={ro || !result} title={!result ? "통화 결과를 먼저 고릅니다" : undefined} onClick={save}>결과 저장 · 다음 단계</Btn>
       </div>
     </div>
   );
@@ -77,7 +83,8 @@ function ConfirmForm({ inc, api, ro }) {
   return (
     <div className="card-glass rounded-xl p-3">
       <Field id={`${inc.id}-confirm-memo`} label="확인 내용 (관제사 메모)" value={memo} onChange={setMemo} type="textarea" placeholder="수치·위치·기기 상태를 확인한 내용" disabled={ro} />
-      <div className="mt-3 flex justify-end gap-2">
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <Btn ghost small tone="ok" disabled={ro} onClick={() => { api.setStep(inc.id, "confirm", { result: "done", memo }); api.resolveHere?.("confirm"); }}>저장하고 여기서 해결 (오작동 등)</Btn>
         <Btn small disabled={ro} onClick={() => api.setStep(inc.id, "confirm", { result: "done", memo })}>이상징후 확인 완료 · 1차 전화로</Btn>
       </div>
     </div>
@@ -100,7 +107,8 @@ function NoticeForm({ inc, c, api, ro }) {
         ))}
       </fieldset>
       <div className="mt-2"><Field id={`${inc.id}-notice-text`} label="통보 내용" value={text} onChange={setText} type="textarea" disabled={ro} /></div>
-      <div className="mt-3 flex justify-end gap-2">
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <Btn ghost small tone="muted" disabled={ro} onClick={() => api.setStep(inc.id, "notice", { result: "skip", memo: "통보 생략 — 보호자와 이미 통화 등" })}>통보 생략 — 건너뛰기</Btn>
         <Btn small disabled={ro || chosen.length === 0} onClick={() => api.setStep(inc.id, "notice", { try: { result: "sent", note: `앱 푸시·문자 → ${chosen.join("·")}` }, result: "done", answer: `발송 대상 ${chosen.join("·")}`, memo: text })}>
           조치 예정 통보 발송
         </Btn>
@@ -115,7 +123,7 @@ const TRANSFER_OPTS = ["미정", "이송", "현장 처치 후 미이송"];
 function Report119Form({ inc, c, api, ro }) {
   const live = !!useAuth().user?.household;
   const rows = build119(inc, c, liveHealth(inc.customer, useAppState()?.state?.onboarding, live));
-  const [f, setF] = useState({ at: fmtTime(Date.now()), reporter: inc.controller || "김태영", caseNo: "", agency: AGENCIES[0], content: `${c.name}(${c.age}세) ${inc.cause} · ${inc.value} · 본인 통화 미연결`, eta: "", arrivedAt: "", transferred: "미정", hospital: "", request: "" });
+  const [f, setF] = useState({ at: fmtTime(Date.now()), reporter: inc.controller || "김태영", caseNo: "", agency: AGENCIES[0], content: `${c.name}${c.age ? `(${c.age}세)` : ""} ${inc.cause} · ${inc.value} · 본인 통화 미연결`, eta: "", arrivedAt: "", transferred: "미정", hospital: "", request: "" });
   const set = (k) => (v) => setF({ ...f, [k]: v });
   const id = `${inc.id}-119`;
   return (
@@ -136,7 +144,7 @@ function Report119Form({ inc, c, api, ro }) {
           <Field id={`${id}-agency`} label="출동기관" value={f.agency} onChange={set("agency")} options={AGENCIES} disabled={ro} />
           <div className="sm:col-span-2"><Field id={`${id}-content`} label="신고내용" value={f.content} onChange={set("content")} type="textarea" disabled={ro} /></div>
           <Field id={`${id}-eta`} label="예상 도착시간" value={f.eta} onChange={set("eta")} placeholder="예: 8분" disabled={ro} />
-          <Field id={`${id}-arrived`} label="실제 도착시간" value={f.arrivedAt} onChange={set("arrivedAt")} placeholder="도착 후 입력" hint="도착·이송 항목은 나중에 이 단계에서 다시 입력할 수 있습니다" disabled={ro} />
+          <Field id={`${id}-arrived`} label="실제 도착시간" value={f.arrivedAt} onChange={set("arrivedAt")} placeholder="도착 후 입력" hint="저장 뒤 도착 · 이송 소식은 이 단계 '메모 남기기'나 '병원 이송 / 보호자 인계' 단계에 적습니다" disabled={ro} />
           <Field id={`${id}-transfer`} label="이송 여부" value={f.transferred} onChange={set("transferred")} options={TRANSFER_OPTS} disabled={ro} />
           <Field id={`${id}-hospital`} label="이송 병원" value={f.hospital} onChange={set("hospital")} disabled={ro} />
           <div className="sm:col-span-2"><Field id={`${id}-request`} label="구급대 요청사항" value={f.request} onChange={set("request")} placeholder="예: 복용약 봉투 준비, 보호자 연락처 전달" disabled={ro} /></div>
@@ -160,7 +168,8 @@ export function DispatchForm({ inc, c, api, ro, compact = false }) {
   if (done) {
     return (
       <div className="card-glass rounded-xl p-3 text-[13px] text-ink">
-        <span className="font-bold text-navy">{done.name}</span> {done.two ? "2인" : "1인"} 출동 지시 {fmtClock(done.orderedAt)} · 예상 도착 {done.etaMin}분 · 거리 {done.distKm}km
+        <span className="font-bold text-navy">{done.name}</span> {done.two ? "2인" : "1인"} 출동 지시 {fmtClock(done.orderedAt)}
+        {done.etaMin != null ? ` · 예상 도착 ${done.etaMin}분 · 거리 ${done.distKm}km` : " · 위치 수신 안 함 — 도착 예상은 컨시어지에게 확인"}
         <div className="mt-1 text-[12px] text-muted">수락 {done.acceptedAt ? fmtClock(done.acceptedAt) : "대기"} · 출발 {done.departedAt ? fmtClock(done.departedAt) : "대기"} · 도착 {done.arrivedAt ? fmtClock(done.arrivedAt) : "대기"}</div>
       </div>
     );
@@ -168,6 +177,12 @@ export function DispatchForm({ inc, c, api, ro, compact = false }) {
   const list = compact ? cands.slice(0, 3) : cands;
   return (
     <div className="space-y-2">
+      {list.length === 0 && <Empty>파견할 수 있는 컨시어지가 없습니다 — 이 센터에 승인된 컨시어지가 아직 없습니다 (계정·권한에서 승인).</Empty>}
+      {!compact && (
+        <div className="flex justify-end">
+          <Btn ghost small tone="muted" disabled={ro} onClick={() => api.setStep(inc.id, "dispatch", { result: "skip", memo: "현장 파견 불필요" })}>파견 불필요 — 건너뛰기</Btn>
+        </div>
+      )}
       {list.map((k, i) => (
         <div key={k.name} className="card-glass flex flex-wrap items-center gap-2 rounded-xl px-3 py-2">
           <div className="min-w-0 flex-1">
@@ -178,7 +193,7 @@ export function DispatchForm({ inc, c, api, ro, compact = false }) {
               <Pill tone={k.emergency ? "ok" : "muted"}>{k.emergency ? "긴급출동 가능" : "긴급출동 불가"}</Pill>
               {k.car && <Pill tone="info">차량</Pill>}
             </div>
-            <div className="mt-0.5 text-[12px] text-muted">{k.where} · <span className="font-num">{k.distKm}km · 예상 도착 {k.etaMin}분</span></div>
+            <div className="mt-0.5 text-[12px] text-muted">{k.where}{k.distKm != null && <> · <span className="font-num">{k.distKm}km · 예상 도착 {k.etaMin}분</span></>}</div>
           </div>
           {!compact && (
             <label htmlFor={`${inc.id}-two-${k.name}`} className="text-[12px] text-muted">
@@ -195,18 +210,20 @@ export function DispatchForm({ inc, c, api, ro, compact = false }) {
       <Confirm
         open={!!pick}
         title={`${pick?.name} 컨시어지를 현장에 파견합니다`}
-        body={pick ? `${c.name} 어르신 자택(${c.district})까지 ${pick.distKm}km · 예상 ${pick.etaMin}분 · ${two[pick.name] ? "2인" : "1인"} 출동. 파견 지시 시각이 기록되고 컨시어지 앱으로 지시가 전송됩니다.` : ""}
+        body={pick ? `${c.name} 어르신 자택(${c.district})${pick.distKm != null ? `까지 ${pick.distKm}km · 예상 ${pick.etaMin}분` : ""} · ${two[pick.name] ? "2인" : "1인"} 출동. 파견 지시 시각이 기록되고 컨시어지 앱으로 지시가 전송됩니다.` : ""}
         confirmLabel="파견 지시"
         tone="danger"
         onCancel={() => setPick(null)}
         onConfirm={() => {
           // 테스트 가구 김순자 님 SOS 에 박지현(테스트 컨시어지 계정)을 보내면 가구 기록에도 급파를 남긴다 —
           // 그래야 컨시어지 폰에 '급파 수락' 배너가 뜨고, 수락하면 그 시각이 여기 '수락' 칸에 붙는다 (2026-10-02).
-          const live = inc.customer === LIVE_ELDER && pick.name === "박지현" && app?.state?.demo?.sos;
+          // 센터 공간은 그 센터 컨시어지 누구에게 보내든 가구 기록에 남긴다 (2026-10-06 점검 — 두 번째 컨시어지는 배너가 안 떴다)
+          const ours = inCenter() ? people().concierges.includes(pick.name) : pick.name === LIVE_CONCIERGE;
+          const live = inc.customer === LIVE_ELDER && ours && app?.state?.demo?.sos;
           api.setStep(inc.id, "dispatch", { result: "done", dispatch: { name: pick.name, two: !!two[pick.name], orderedAt: Date.now(), acceptedAt: live ? app.state.ops?.sosAcceptedAt || null : null, departedAt: null, arrivedAt: null, actions: "", accompany: false, etaMin: pick.etaMin, distKm: pick.distKm } });
           if (live && !app.state.ops?.sosDispatched) {
-            app.dispatch({ type: "opsPatch", patch: { sosDispatched: true } });
-            app.dispatch({ type: "pushEvent", payload: { kind: "대응", text: `${pick.name} 급파 지시 (SOS 센터) · 도착 예정 ${pick.etaMin}분`, color: "#FF8A80" } });
+            app.dispatch({ type: "opsPatch", patch: { sosDispatched: true, sosDispatchedTo: pick.name } });
+            app.dispatch({ type: "pushEvent", payload: { kind: "대응", text: `${pick.name} 급파 지시 (SOS 센터)${pick.etaMin != null ? ` · 도착 예정 ${pick.etaMin}분` : ""}`, color: "#FF8A80" } });
           }
           setPick(null);
         }}
