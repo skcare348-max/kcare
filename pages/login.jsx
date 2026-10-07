@@ -10,9 +10,12 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import Logo from "../components/Logo";
+import MemberLogin from "../components/MemberLogin";
+import { AREAS, areaOfRole } from "../lib/centers";
 import {
   AUTH_ENABLED,
   GOOGLE_SIMULATED,
+  MEMBER_LOGIN,
   TEST_LOGIN,
   GoogleMark,
   PROVIDER_LABEL,
@@ -52,7 +55,7 @@ function ServerLine() {
   if (!s) return null;
   const ok = s.db?.ok;
   const text = ok
-    ? "서버 저장 연결됨 — 로그인하면 기록이 Supabase 에 쌓입니다"
+    ? "서버 저장 연결됨 — 로그인하면 기록이 서버에 쌓입니다"
     : s.db?.configured
       ? `서버 저장 확인 필요 (${s.db.error || "오류"}) — DEPLOY.md 5단계`
       : "서버 저장 설정 전 — 로그인해도 이 기기에만 저장됩니다";
@@ -73,17 +76,34 @@ export default function LoginPage() {
   const [id, setId] = useState(TEST_ACCOUNTS[0].id);
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
+  // 회원 아이디(가입한 어르신 · 보호자)가 먼저 — 테스트 계정 · 구글(시뮬레이션)은 베타 테스터용 탭 (2026-10-06 UX 점검:
+  // 테스트 탭이 먼저 열려 있어 가입한 아이디를 넣으면 '맞지 않습니다'가 떴다)
+  const [tab, setTab] = useState(MEMBER_LOGIN ? "member" : "test");
+  const [memberId, setMemberId] = useState("");
+  const [moved, setMoved] = useState(false);
   const signedIn = auth.status === "authenticated" && auth.user;
 
   useEffect(() => {
     if (typeof router.query.error === "string") setError(router.query.error);
   }, [router.query.error]);
+  useEffect(() => {
+    if (MEMBER_LOGIN && (typeof router.query.id === "string" || router.query.tab === "member")) setTab("member");
+    if (router.query.tab === "test" && TEST_LOGIN) setTab("test");
+    if (typeof router.query.id === "string") setMemberId(router.query.id);
+  }, [router.query.id, router.query.tab]);
 
   // 로그인 뒤 갈 곳 — 요청받은 화면이 있으면 거기, 없으면 역할 화면
   const destination = (role) => (callbackUrl !== "/" ? callbackUrl : ROLE_HOME[role] || "/");
 
   const submit = async (e) => {
     e.preventDefault();
+    // 테스트 계정이 아닌 아이디 — 가입한 아이디 탭으로 옮겨 준다 (비밀번호는 다시 넣는다)
+    if (MEMBER_LOGIN && !findTestAccount(id.trim())) {
+      setMemberId(id.trim());
+      setMoved(true);
+      setTab("member");
+      return;
+    }
     setBusy(true);
     setError(null);
     const r = await testSignIn({ id, password: pw });
@@ -103,6 +123,20 @@ export default function LoginPage() {
       <div className="flex min-h-screen items-start justify-center bg-nav px-5">
         <main className="w-full max-w-[420px] py-14">
           <Logo height={40} tone="onDark" beta />
+          {/* 로그인 입구 세 곳 — 이용자(여기) · 현장 · 영업 · 관제 (2026-10-06) */}
+          <nav aria-label="로그인 입구" className="mt-6 grid grid-cols-3 gap-1.5 rounded-2xl bg-white/[.06] p-1.5">
+            {Object.values(AREAS).map((x) => (
+              <Link
+                key={x.key}
+                href={x.login}
+                aria-current={x.key === "user" ? "page" : undefined}
+                className={`flex min-h-[48px] flex-col items-center justify-center rounded-xl px-1 text-center leading-tight ${x.key === "user" ? "bg-gold text-navy" : "text-white/70"}`}
+              >
+                <span className="text-[14px] font-bold">{x.label}</span>
+                <span className={`text-[11px] ${x.key === "user" ? "opacity-90" : "text-white/60"}`}>{x.desc}</span>
+              </Link>
+            ))}
+          </nav>
           <h1 className="mt-6 text-[26px] font-black leading-[1.35] text-white">K-CARE 베타 로그인</h1>
           <p className="mt-2 text-[14px] leading-[1.75] text-white/60">
             로그인하면 한 일이 서버에 저장되고 같은 가구의 다른 폰에도 보입니다. 로그인하지 않으면 데모(시뮬레이션)로
@@ -156,7 +190,7 @@ export default function LoginPage() {
                     <dd className="font-bold text-ink">{PROVIDER_LABEL[auth.user.provider] || "—"}</dd>
                   </div>
                   <div className="flex gap-3">
-                    <dt className="w-[52px] shrink-0 text-muted">가구</dt>
+                    <dt className="w-[52px] shrink-0 text-muted">소속</dt>
                     <dd className="font-bold text-ink">{householdName(auth.user.household) || "없음 (데모로 봅니다)"}</dd>
                   </div>
                   <div className="flex gap-3">
@@ -174,7 +208,8 @@ export default function LoginPage() {
                   onClick={async () => {
                         // 모아 둔 것을 다 보낸 뒤에 나간다 — 로그아웃하면 세션이 끊겨 더는 못 보낸다
                         await sync.flush?.();
-                        logout("/login");
+                        // 자기 영역 입구로 — 컨시어지가 로그아웃하면 현장 · 영업 로그인으로
+                        logout(AREAS[areaOfRole(auth.user.role)]?.login || "/login");
                       }}
                   className="btn-press mt-2 w-full rounded-xl border border-navy/15 py-3 text-[14px] font-bold text-muted"
                 >
@@ -189,21 +224,59 @@ export default function LoginPage() {
                     {ERRORS[error] || "로그인하지 못했습니다. 다시 시도해 주세요."}
                   </p>
                 )}
-                <button
-                  onClick={() => googleStart(callbackUrl)}
-                  disabled={auth.status === "loading"}
-                  className="btn-press flex w-full items-center justify-center gap-2.5 rounded-xl border border-[#DADCE0] bg-white py-3.5 text-[15px] font-bold text-[#1F1F1F] disabled:opacity-60"
-                >
-                  <GoogleMark size={20} />
-                  Google 계정으로 계속하기
-                </button>
-                {GOOGLE_SIMULATED && (
-                  <p className="mt-2 text-[12px] leading-[1.7] text-muted">
-                    <b className="text-navy">테스트 모드</b> — 구글 연결 전이라 실제 Google 대신 테스트 계정으로 흐름만 흉내 냅니다.
-                  </p>
+                {MEMBER_LOGIN && (
+                  <div role="group" aria-label="로그인 방법" className="grid grid-cols-2 gap-1.5 rounded-xl bg-paper p-1">
+                    {[["member", "가입한 아이디"], ["test", "베타 테스트 계정"]].map(([k, t]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        aria-pressed={tab === k}
+                        onClick={() => setTab(k)}
+                        className={`min-h-[44px] rounded-lg text-[14px] font-bold ${tab === k ? "bg-white text-navy shadow-[0_2px_8px_-4px_rgba(10,31,60,.35)]" : "text-muted"}`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
                 )}
-
-                {TEST_LOGIN ? (
+                {/* 회원 로그인이 켜져 있으면 구글은 베타 테스터용 탭 안으로 — 가입한 회원이 먼저 보는 곳이 아니다 */}
+                {(!MEMBER_LOGIN || tab === "test") && (
+                  <div className={MEMBER_LOGIN ? "mt-5" : ""}>
+                    <button
+                      onClick={() => googleStart(callbackUrl)}
+                      disabled={auth.status === "loading"}
+                      className="btn-press flex w-full items-center justify-center gap-2.5 rounded-xl border border-[#DADCE0] bg-white py-3.5 text-[15px] font-bold text-[#1F1F1F] disabled:opacity-60"
+                    >
+                      <GoogleMark size={20} />
+                      Google 계정으로 계속하기
+                    </button>
+                    {GOOGLE_SIMULATED && (
+                      <p className="mt-2 text-[12px] leading-[1.7] text-muted">
+                        <b className="text-navy">테스트 모드</b> — 구글 연결 전이라 실제 Google 대신 테스트 계정으로 흐름만 흉내 냅니다.
+                      </p>
+                    )}
+                  </div>
+                )}
+                {MEMBER_LOGIN && tab === "member" ? (
+                  <div className="mt-5">
+                    {moved && (
+                      <p role="status" className="mb-3 rounded-xl bg-paper px-3.5 py-2.5 text-[13px] font-bold leading-[1.6] text-navy">
+                        가입한 아이디는 여기서 로그인합니다 — 비밀번호를 다시 넣어 주세요.
+                      </p>
+                    )}
+                    <MemberLogin key={memberId} area="user" callbackUrl={callbackUrl} defaultId={memberId} />
+                    {/* 문장 속 작은 링크 대신 누르기 쉬운 단추로 — 어르신 · 보호자 입구다 (터치 타깃 24px 이상) */}
+                    <p className="mt-3 text-[12px] leading-[1.7] text-muted">
+                      어르신 · 보호자 아이디로 들어옵니다. 아직 아이디가 없으면 담당 케어센터에서 받은 가입 코드로 가입하세요.
+                    </p>
+                    <Link
+                      href="/join"
+                      className="btn-press mt-2 flex min-h-[44px] w-full items-center justify-center rounded-xl border border-navy/20 text-[14px] font-bold text-navy"
+                    >
+                      회원가입 (가입 코드 필요)
+                    </Link>
+                  </div>
+                ) : TEST_LOGIN ? (
                   <form onSubmit={submit} className="mt-5">
                     <div className="mb-4 flex items-center gap-3 text-[12px] font-bold text-muted">
                       <span className="h-px flex-1 bg-navy/10" />
@@ -276,6 +349,11 @@ export default function LoginPage() {
           </div>
 
           <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2">
+            {MEMBER_LOGIN && (
+              <Link href="/join" className="tap text-[13px] font-bold text-white/70 underline underline-offset-2">
+                회원가입 (어르신 · 보호자)
+              </Link>
+            )}
             <Link href="/" className="tap text-[13px] font-bold text-white/70 underline underline-offset-2">
               로그인 없이 데모 둘러보기
             </Link>

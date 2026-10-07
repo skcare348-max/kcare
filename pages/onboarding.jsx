@@ -20,6 +20,8 @@ import { LIVE_ELDER } from "../lib/ops-health";
 const AUTH_LABEL = { google: "Google", kakao: "카카오", naver: "네이버" };
 import { useAppState } from "../lib/state";
 import RoleGate from "../components/RoleGate";
+import { centerNow } from "../lib/people-store";
+import { people } from "../lib/people";
 
 // 온보딩 — REQ-05 상품 · REQ-07 결제권한 · REQ-15 이용적합성 심사
 //
@@ -76,7 +78,8 @@ function Onboarding() {
   }, [router.query.ref]);
   const salesRef = isRepCode(form.salesRef) ? form.salesRef.trim().toUpperCase() : null;
   // 데모 영업자는 한 명이다 — 코드가 맞으면 이름을 보여 주고, 모르는 코드는 코드만 남긴다
-  const salesRefLabel = salesRef ? (salesRef === SALES_REP.code ? `${SALES_REP.name} (${salesRef})` : salesRef) : null;
+  // 예시 영업자 이름은 데모 · 테스트 가구에서만 붙인다 — 센터 공간은 코드만 (누구 코드인지 지어 붙이지 않는다)
+  const salesRefLabel = salesRef ? (salesRef === SALES_REP.code && !centerNow() ? `${SALES_REP.name} (${salesRef})` : salesRef) : null;
 
   const track = form.track ? trackOf(form.track) : null;
   // 트랙을 고르기 전에도 진행 막대를 그려야 해서 기본 흐름을 빌려 쓴다
@@ -101,7 +104,8 @@ function Onboarding() {
   // 부부 가구 — 월 구독료만 확정(77,000). 가입·설치비는 결정에 없어 확정 전으로 안내한다.
   const couple = !!track?.needsRelation && form.household === "couple";
   // 테스트 계정으로 정기 케어 가입 상담을 하면 어르신 이름을 고정한다 (아래 finish 주석)
-  const lockName = !!auth.user?.household && !!track?.needsRelation;
+  // 관제 센터 공간(2026-10-06)은 어르신이 회원으로 가입해 있을 때만 그 이름으로 고정 — 아직이면 여기 적은 이름을 쓴다
+  const lockName = !!auth.user?.household && !!track?.needsRelation && (!centerNow() || people().elders.length > 0);
   const monthlyFee = couple ? HOUSEHOLD.monthly : track?.billing?.monthly;
   // 거주 형태에 따라 기본상품이 갈린다 — 실무자 피드백 시트의 표 그대로
   const benefits = hospital ? HOSPITAL_BENEFITS : BASE_BENEFITS;
@@ -124,7 +128,7 @@ function Onboarding() {
         res: form.res,
         // 테스트 가구는 어르신 이름을 김순자로 고정한다 — 관제 · 컨시어지 · 감사로그는 김순자로 보는데
         // 가입 상담에서 다른 이름(예: 김오자)을 넣으면 보호자 · 어르신 화면만 그 이름이 돼 섞였다 (2026-10-02 QA 11번)
-        elderName: lockName ? LIVE_ELDER : form.elderName || (track?.needsRelation ? "김순자" : "본인"),
+        elderName: lockName ? LIVE_ELDER : form.elderName || (track?.needsRelation ? LIVE_ELDER : "본인"),
         district: form.district,
         tier: result?.tier ?? 1,
         paymentMode: form.paymentMode,
@@ -138,7 +142,7 @@ function Onboarding() {
       type: "pushEvent",
       payload: {
         kind: "가입",
-        text: `신규 접수 — ${track?.short} · ${lockName ? LIVE_ELDER : form.elderName || (track?.needsRelation ? "김순자" : "본인")} (${form.district})${salesRef ? ` · 추천 ${salesRef}` : ""}`,
+        text: `신규 접수 — ${track?.short} · ${lockName ? LIVE_ELDER : form.elderName || (track?.needsRelation ? LIVE_ELDER : "본인")} (${form.district})${salesRef ? ` · 추천 ${salesRef}` : ""}`,
         color: "#8FE3C0",
       },
     });
@@ -544,7 +548,7 @@ function Onboarding() {
                   />
                   {form.salesRef.trim() && !isRepCode(form.salesRef) && (
                     <p className="mt-1.5 text-[12px] font-bold leading-[1.6] text-amber">
-                      코드 형식은 S-0000 입니다. 받으신 코드를 다시 확인해 주세요.
+                      코드는 S- 로 시작합니다 (예: S-0012 · S-영업자아이디). 받으신 코드를 다시 확인해 주세요.
                     </p>
                   )}
                 </div>
@@ -573,7 +577,7 @@ function Onboarding() {
                 확인합니다.
               </p>
               <Card className="p-5">
-                <SectionLabel>{who} 성함 {lockName ? "(테스트 가구 고정)" : "(선택)"}</SectionLabel>
+                <SectionLabel>{who} 성함 {lockName ? (centerNow() ? "(어르신 회원 이름)" : "(테스트 가구 고정)") : "(선택)"}</SectionLabel>
                 <input
                   value={lockName ? LIVE_ELDER : form.elderName}
                   readOnly={lockName}
@@ -584,7 +588,10 @@ function Onboarding() {
                 />
                 {lockName && (
                   <p className="mt-1.5 text-[12px] leading-[1.6] text-muted">
-                    테스트 가구는 모든 화면이 같은 이름을 쓰도록 {LIVE_ELDER} 님으로 고정합니다. 실제 이름은 넣지 마세요.
+                    {centerNow()
+                      ? `이 센터에 가입한 어르신 회원(${LIVE_ELDER} 님) 이름을 그대로 씁니다.`
+                      : `테스트 가구는 모든 화면이 같은 이름을 쓰도록 ${LIVE_ELDER} 님으로 고정합니다.`}{" "}
+                    실제 이름은 넣지 마세요.
                   </p>
                 )}
                 <div className="mt-5">
@@ -963,7 +970,7 @@ function Onboarding() {
                           ["가구 구성", couple ? `부부 두 분 · 월 ${fmtWon(HOUSEHOLD.monthly)}` : "한 분"],
                         ]
                       : []),
-                    [who, `${lockName ? LIVE_ELDER : form.elderName || (track.needsRelation ? "김순자" : "본인")}님 · ${form.district}`],
+                    [who, `${lockName ? LIVE_ELDER : form.elderName || (track.needsRelation ? LIVE_ELDER : "본인")}님 · ${form.district}`],
                     track.needsRelation
                       ? [
                           "보호자",

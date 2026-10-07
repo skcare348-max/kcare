@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import FamilyLayout from "../../components/FamilyLayout";
 import { Card, SectionLabel, Badge, PendingTag, Collapse } from "../../components/ui";
 import Icon from "../../components/icons";
-import { AI_ASSISTANT_QA, CARE_TEAM, ELDER, EVENT_GROUPS, EVENT_KINDS, FEED_TONE, NEIGHBORHOOD_FEED, OUTING, VITALS, WEEKLY } from "../../lib/mock";
+import { AI_ASSISTANT_QA, CARE_TEAM, ELDER, EVENT_GROUPS, EVENT_KINDS, FEED_TONE, NEIGHBORHOOD_FEED, OUTING, VITALS, WEEKLY, elderWho } from "../../lib/mock";
 import { trackOf, subjectLabel, honorific, josa } from "../../lib/tracks";
 import VoiceNote from "../../components/VoiceNote";
 import MapDialog, { distanceM, prettyDistance } from "../../components/MapDialog";
@@ -15,9 +15,11 @@ import { useAuth } from "../../lib/auth";
 import { scopedKey } from "../../lib/scope";
 import { useLastActivity } from "../../lib/last-activity";
 import { healthOf } from "../../lib/meds";
-import { STAGE_LABEL, visitReportOf } from "../../lib/live-household";
+import { LIVE_CONCIERGE, LIVE_TAG, STAGE_LABEL, visitReportOf } from "../../lib/live-household";
+import { centerNow } from "../../lib/people-store";
 import { approverOf } from "../../lib/requests";
 import { HelpCallCard } from "../../components/HelpCall";
+import { avatarText, meAs } from "../../lib/people";
 
 // 받은 음성 '받은 때' — 오늘 · 어제는 말로, 그 전은 날짜로 (시각만 쓰면 며칠 전 것도 오늘처럼 읽힌다)
 const whenLabel = (at) => {
@@ -39,7 +41,8 @@ const whenLabel = (at) => {
 export default function FamilyHome() {
   const { state, dispatch } = useAppState();
   const [demoOpen, setDemoOpen] = useState(false);
-  const live = !!useAuth().user?.household; // 테스트 계정 — 시연 컨트롤(SOS 켜기 · 이상 징후 재현)을 숨긴다
+  const authUser = useAuth().user;
+  const live = !!authUser?.household; // 테스트 계정 — 시연 컨트롤(SOS 켜기 · 이상 징후 재현)을 숨긴다
   // SOS '확인했습니다' — 이 기기에서만 배너를 접는다. SOS 해제는 관제만 한다 (ackSos).
   // 전에는 이 버튼이 SOS 자체를 꺼서 관제 팝업 · 알람과 컨시어지 알람까지 같이 사라졌다 (2026-10-02 코드 점검).
   const sosKey = state.demo.sos ? String(state.demo.sosAt || "on") : "";
@@ -60,9 +63,9 @@ export default function FamilyHome() {
     }
   };
   const sosStage = state.ops?.sosAcceptedAt
-    ? "박지현 컨시어지가 출동을 수락해 이동 중입니다 · 관제센터 대응 중"
+    ? `${LIVE_CONCIERGE} 컨시어지가 출동을 수락해 이동 중입니다 · 관제센터 대응 중`
     : state.ops?.sosDispatched
-      ? "관제센터가 박지현 컨시어지를 급파했습니다 · 수락 대기"
+      ? `관제센터가 ${LIVE_CONCIERGE} 컨시어지를 급파했습니다 · 수락 대기`
       : "관제센터가 확인하고 있습니다 — 곧 연락드립니다";
   // '지금 어디쯤' 지도 (2026-08-31 요청) — 오늘 오시는 주 동행이 어디까지 왔는지.
   // 좌표는 lib/console.js 한 곳에서 온다 (관제 지도와 같은 값).
@@ -86,7 +89,8 @@ export default function FamilyHome() {
   const heard = voicesToElder.filter((v) => state.elder?.msgPlayed?.[v.id]).length;
   // 어르신 → 주 보호자(아들 민수) · 가족 모두에게 온 목소리 — 최근 것부터
   const fromElder = (state.voices || [])
-    .filter((v) => v.from === `${ELDER.name} 님` && (v.to === "아들 민수" || v.to === "가족 모두"))
+    // 관제 센터 공간은 그 센터 보호자 이름 앞으로 온 것 (lib/people.js voiceTargetsCenter)
+    .filter((v) => v.from === `${ELDER.name} 님` && (v.to === (centerNow() ? meAs(authUser, "guardian") : "아들 민수") || v.to === "가족 모두"))
     .sort((a, b) => b.at - a.at);
   const unheardFromElder = fromElder.filter((v) => !state.guardian?.voiceHeard?.[v.id]).length;
   const [elderVoicesAll, setElderVoicesAll] = useState(false);
@@ -225,7 +229,7 @@ export default function FamilyHome() {
             <span className="h-[10px] w-[10px] shrink-0 animate-livePing rounded-full bg-green" />
             <div className="min-w-0 flex-1">
               <div className="text-[14px] font-bold text-navy">
-                지금 박지현 컨시어지가 {subj} 곁에 함께 있습니다
+                지금 {LIVE_CONCIERGE} 컨시어지가 {subj} 곁에 함께 있습니다
               </div>
               <div className="mt-0.5 text-[12px] leading-[1.6] text-muted">
                 {/* 실제 체크인 시각 — 고정 '13:50 출발'은 체크인 시각과 어긋났다 (2026-10-02 QA) */}
@@ -539,11 +543,11 @@ export default function FamilyHome() {
             <span className="text-[12px] font-bold tracking-[.14em] text-gold-soft">
               담당 컨시어지
             </span>
-            <span className="font-num text-[12px] text-white/60">{live ? "테스트 컨시어지 계정" : CARE_TEAM.dateLabel}</span>
+            <span className="font-num text-[12px] text-white/60">{live ? (centerNow() ? `${LIVE_TAG} 담당` : "테스트 컨시어지 계정") : CARE_TEAM.dateLabel}</span>
           </div>
           <div className="mt-3 space-y-2.5">
             {/* 테스트 가구 — 실제로 앱을 쓰는 컨시어지(박지현)만. 경력 · 방문 횟수 같은 예시 이력은 쓰지 않는다 */}
-            {(live ? CARE_TEAM.members.slice(0, 1).map((m) => ({ ...m, career: "주 담당 · 안심방문 · 동행", relation: visitStage })) : CARE_TEAM.members).map((m) => (
+            {(live ? CARE_TEAM.members.slice(0, 1).map((m) => ({ ...m, name: LIVE_CONCIERGE, initials: centerNow() ? avatarText(LIVE_CONCIERGE) : m.initials, career: "주 담당 · 안심방문 · 동행", relation: visitStage })) : CARE_TEAM.members).map((m) => (
               <div
                 key={m.name}
                 className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[.05] p-3.5"
@@ -833,7 +837,7 @@ export default function FamilyHome() {
                     type: "pushEvent",
                     payload: state.demo.sos
                       ? { kind: "SOS", text: "SOS 알림 끔 (시연 컨트롤)", color: "#8FA9CC" }
-                      : { kind: "SOS", text: `${ELDER.name}(${ELDER.age}) SOS 발신 (시연 컨트롤) · 가족·관제 동시 점등`, color: "#FF8A80" },
+                      : { kind: "SOS", text: `${elderWho()} SOS 발신 (시연 컨트롤) · 가족·관제 동시 점등`, color: "#FF8A80" },
                   });
                 }}
                 className="btn-press rounded-lg border border-navy/20 px-3 py-1.5 text-[12px] font-bold text-muted"

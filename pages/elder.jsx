@@ -16,12 +16,13 @@ import {
   VOICE_TO,
   seedAt,
   rollingTopics,
+  elderWho,
 } from "../lib/mock";
 import { PRICING, fmtWon } from "../lib/config";
 import { STORE_CATALOG } from "../lib/store";
 import ProductSheet from "../components/ProductSheet";
 import { CLOSED, SERVICE_MENU, SERVICE_PLUS, approverOf, cancelRule, fmtScheduled, isStoreOrder, isVisitCall } from "../lib/requests";
-import { LIVE_CONCIERGE } from "../lib/live-household";
+import { assigneeNow, avatarText, elderNameOf, givenName, inCenter, voiceTargetsCenter } from "../lib/people";
 import { MED_STREAK, SUPPLEMENTS, daysLeft, healthOf, medProgress, needsReorder, slotHour } from "../lib/meds";
 import { VERDICT, matchWelfare, profileFor, welfareCounts } from "../lib/welfare";
 import { elderSpentToday, eventsFor, needsGuardianApproval, useAppState } from "../lib/state";
@@ -114,9 +115,7 @@ const HOME_TILES = [
 ];
 
 // "김순자" → "순자" — 성 포함 호칭 금지 (06 §1 헤더 카피)
-function givenName(full) {
-  return full && full.length >= 3 ? full.slice(1) : full || "";
-}
+// 부르는 이름 — lib/people.js (세 글자 이름만 성을 뗀다)
 
 // 24시간제 금지 — "오후 2시 30분" 구어 표기 (06 §7)
 // 띠배너용 짧은 날짜 — 오늘/내일/모레는 그 말로, 그 뒤는 날짜로.
@@ -145,7 +144,8 @@ function spokenClock(hhmm) {
 function medDoseNames(slot, medPlan) {
   const plan = medPlan.find((d) => d.slot === slot);
   const rx = plan?.elderLabel ? [plan.elderLabel] : (plan?.items || []).map((i) => stripIngredient(i.name));
-  const sup = SUPPLEMENTS.filter((x) => x.slot === slot).map((x) => x.name.split(" ")[0]);
+  // 건강식품은 예시 목록이다 — 관제 센터 공간에는 붙이지 않는다 (2026-10-06 누수 점검)
+  const sup = (inCenter() ? [] : SUPPLEMENTS).filter((x) => x.slot === slot).map((x) => x.name.split(" ")[0]);
   return [...rx, ...sup].join(" · ");
 }
 
@@ -355,7 +355,7 @@ function ElderHome() {
   const payMode = state.onboarding?.paymentMode || "limit";
   const payLimit = state.onboarding?.limitAmount ?? PRICING.paymentLimitDefault;
   // 승인하는 가족 — 가입 상담을 거친 가구는 보호자 이름을 받지 않으므로 '보호자'로 부른다 (예시 '민수'로 지어내지 않는다)
-  const approver = state.onboarding?.rel ? "보호자" : "민수";
+  const approver = state.onboarding?.rel || inCenter() ? "보호자" : "민수";
   const payRule = {
     approver,
     headline: {
@@ -391,7 +391,7 @@ function ElderHome() {
   const proposalsForMe = (state.requests || []).filter((r) => r.status === "requested" && approverOf(r) === "elder");
   const [elderConfirm, setElderConfirm] = useState(null); // { id, kind: "cancel" | "decline" }
 
-  const name = givenName(state.onboarding?.elderName || ELDER.name);
+  const name = givenName(elderNameOf(state.onboarding));
   const now = new Date();
   const dateLong = now.toLocaleDateString("ko-KR", {
     year: "numeric",
@@ -447,14 +447,18 @@ function ElderHome() {
   // 연속 성공일 — 오늘까지 다 드셨으면 어제까지의 연속에 하루를 더한다
   // 등록된 약이 없으면(편집기에서 모두 뺀 경우) '다 드셨습니다'도 연속 하루도 아니다 (2026-10-02 코드 리뷰)
   const medAllDone = med.total > 0 && med.done === med.total;
-  const medStreak = MED_STREAK.days + (medAllDone ? 1 : 0);
+  // 연속 기록 · 이번 주 동그라미는 예시 기록에서 온다 — 관제 센터 공간에는 지난 기록이 없다 (2026-10-06 누수 점검)
+  const streak = inCenter() ? { days: 0, week: [] } : MED_STREAK;
+  const medStreak = streak.days + (medAllDone ? 1 : 0);
   // 아직 안 드신 것 중 첫 번째 = 지금 드실 약. 그 다음 것은 한 줄로만 예고한다.
   const medPending = medPlan.filter((d) => !medSlots[d.slot]);
   const medNext = medPending[0] || null;
   const medAfter = medPending[1] || null;
   const [medPop, setMedPop] = useState(null); // 알람 팝업이 띄운 시간대 (null이면 닫힘)
   // 건기식 — 용량이 부족하거나 유통기한이 다가온 것만 위로 올린다
-  const supplements = SUPPLEMENTS.map((s) => ({ ...s, alert: needsReorder(s) }));
+  // 오늘 여쭤볼 것 — 예시 질문(아들 민수가 남긴 것 …)은 관제 센터 공간에 두지 않는다
+  const askList = inCenter() ? [] : ASK_DOCTOR;
+  const supplements = (inCenter() ? [] : SUPPLEMENTS).map((s) => ({ ...s, alert: needsReorder(s) }));
   const supAlerts = supplements.filter((s) => s.alert);
   // 세대공감 — 옆으로 밀어 보는 5장 (2026-08-28 요청 "하루 1개 말고 롤링 5개").
   // 첫 장이 오늘 것이고 날짜가 바뀌면 목록 전체가 한 칸 돈다.
@@ -645,7 +649,7 @@ function ElderHome() {
     });
     dispatch({
       type: "pushEvent",
-      payload: { kind: "방문", text: `${ELDER.name}(${ELDER.age}) 즉시 방문 요청 · 관제 확인 전화 발신`, color: "#B08D57" },
+      payload: { kind: "방문", text: `${elderWho()} 즉시 방문 요청 · 관제 확인 전화 발신`, color: "#B08D57" },
     });
   };
   // 도와줘요의 지금 상태는 깃발(visitAsked)이 아니라 요청 자체에서 읽는다 — 관제가 확인 전화를 마치면
@@ -659,7 +663,7 @@ function ElderHome() {
 
   // 복지혜택 — 이 댁에 맞는 것 (앱 전체 3번). 보호자가 답한 것(state.welfare.answers)이
   // 얹혀서, 보호자가 확인할수록 '받으실 수 있어요'가 늘어난다.
-  const welfareMatches = matchWelfare(profileFor(state.onboarding?.elderName || ELDER.name, state.welfare?.answers));
+  const welfareMatches = matchWelfare(profileFor(elderNameOf(state.onboarding), state.welfare?.answers));
   const welfareN = welfareCounts(welfareMatches);
   const welfareAsked = (state.requests || []).some((r) => r.dir === "fromElder" && r.type === "복지혜택 안내 부탁");
 
@@ -928,7 +932,7 @@ function ElderHome() {
                       className="flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-full text-[16px] font-bold"
                       style={{ background: "#E8DFCB", color: "#7A5C28" }}
                     >
-                      {TEACHER.name.slice(1)}
+                      {avatarText(TEACHER.name)}
                     </span>
                     <span className="min-w-0 flex-1 text-[19px] font-bold leading-[1.35]">
                       {TEACHER.name} 선생님이
@@ -1093,7 +1097,7 @@ function ElderHome() {
                   className="flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-full text-[16px] font-bold"
                   style={{ background: "#E8DFCB", color: "#7A5C28" }}
                 >
-                  {TEACHER.name.slice(1)}
+                  {avatarText(TEACHER.name)}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="text-[20px] font-bold leading-[1.3] text-navy">{TEACHER.name} 선생님</div>
@@ -1426,7 +1430,7 @@ function ElderHome() {
                       className="btn-press mt-3 flex w-full items-center justify-center gap-2 rounded-[18px] py-[19px] text-[19px] font-bold text-white"
                       style={{ background: "rgba(255,255,255,.13)" }}
                     >
-                      {calling ? "박지현 선생님께 연결 중입니다" : "박지현 선생님께 전화"}
+                      {calling ? `${TEACHER.name} 선생님께 연결 중입니다` : `${TEACHER.name} 선생님께 전화`}
                     </button>
                     {/* 방문 사기 방어 — 설명을 줄이는 중에도 이 한 줄은 남긴다 (안전) */}
                     <p className="mt-2.5 text-[17px] leading-[1.5] text-white/[.8]">
@@ -1577,19 +1581,20 @@ function ElderHome() {
                   오늘 약을 다 드셨습니다. 참 잘하셨어요.
                 </p>
               )}
-              {MED_STREAK.days > 0 && (
+              {streak.days > 0 && (
                 <p className="mt-3 text-center text-[18px] font-bold" style={{ color: "#1E7A5A" }}>
                   어제도 다 챙겨 드셨어요 ✓
                 </p>
               )}
 
               {/* 이번 주 — 시안의 동그라미 줄. 못 드신 날은 회색 (빨강은 SOS 전용) */}
+              {streak.week.length > 0 && (
               <div className="mt-3 rounded-[16px] px-4 py-3.5" style={SUB_CARD}>
                 <p className="text-center text-[17px] font-bold text-navy">
                   {medPlan[0]?.elderLabel || "드시는 약"}, 요즘 참 꾸준히 드시고 계세요
                 </p>
                 <div className="mt-2.5 flex gap-1">
-                  {[...MED_STREAK.week, { label: "오늘", done: medAllDone, today: true }].map((d) => (
+                  {[...streak.week, { label: "오늘", done: medAllDone, today: true }].map((d) => (
                     <div key={d.label} className="flex flex-1 flex-col items-center gap-1">
                       <span className={`text-[15px] font-bold ${d.today ? "text-navy" : "text-muted"}`}>{d.label}</span>
                       <span
@@ -1609,6 +1614,7 @@ function ElderHome() {
                   ))}
                 </div>
               </div>
+              )}
             </ElderCard>
 
             {/* order 2 · 드시는 약 정보 — 첫 안심방문 때 등록한 장복약 정보와 기록
@@ -1652,12 +1658,13 @@ function ElderHome() {
               order={3}
               title="드시는 건강식품"
               icon="drop"
-              right={supAlerts.length ? `${supAlerts.length}가지 챙기실 것` : "넉넉합니다"}
+              right={!supplements.length ? "등록 전" : supAlerts.length ? `${supAlerts.length}가지 챙기실 것` : "넉넉합니다"}
               rightColor={supAlerts.length ? "#8A5D12" : "#5C5A54"}
               open={supOpen}
               onToggle={() => setSupOpen((v) => !v)}
             >
               <div className="space-y-2.5">
+                {supplements.length === 0 && <p className="text-[18px] leading-[1.5] text-muted">등록된 건강식품이 없습니다.</p>}
                 {supplements.map((s) => {
                   const left = daysLeft(s);
                   const pct = Math.round((s.remain / Math.max(1, s.total)) * 100);
@@ -1698,7 +1705,7 @@ function ElderHome() {
                                 amount: null,
                                 preferredDate: null,
                                 urgency: "normal",
-                                assignee: "박지현",
+                                assignee: assigneeNow() || "",
                                 photos: [],
                                 status: "requested",
                                 history: [{ at: Date.now(), status: "requested", note: "재구매 알림에서 요청" }],
@@ -1738,12 +1745,13 @@ function ElderHome() {
               order={6}
               title="오늘 여쭤볼 것"
               icon="chat"
-              summary={`${ASK_DOCTOR.length}가지`}
+              summary={`${askList.length}가지`}
               open={askDoctorOpen}
               onToggle={() => setAskDoctorOpen((v) => !v)}
             >
               <div>
-                {ASK_DOCTOR.map((q) => (
+                {askList.length === 0 && <p className="text-[18px] leading-[1.5] text-muted">아직 적힌 것이 없습니다.</p>}
+                {askList.map((q) => (
                   <div
                     key={q.seq}
                     className="flex gap-3 border-t border-navy/[.07] py-[14px] first:border-t-0"
@@ -1838,7 +1846,7 @@ function ElderHome() {
                       amount: null,
                       preferredDate: null,
                       urgency: "normal",
-                      assignee: "박지현",
+                      assignee: assigneeNow() || "",
                       photos: [],
                       status: "requested",
                       history: [{ at: Date.now(), status: "requested", note: "음성 요청" }],
@@ -2279,7 +2287,7 @@ function ElderHome() {
                           payBy: storeApproval ? null : "elder", // 하루 누적 한도에 들어간다
                           preferredDate: null,
                           urgency: "normal",
-                          assignee: "박지현",
+                          assignee: assigneeNow() || "",
                           photos: [],
                           status: storeApproval ? "awaitingPayment" : "inProgress",
                           history: [
@@ -2396,6 +2404,7 @@ function ElderHome() {
             >
               <CardHead title="가족" right="목소리로 주고받아요" />
               <FamilyThreads
+                targets={inCenter() ? voiceTargetsCenter() : VOICE_TO}
                 open={famOpen}
                 onToggle={(id) => setFamOpen((cur) => (cur === id ? null : id))}
                 threadFor={threadFor}
@@ -2409,7 +2418,7 @@ function ElderHome() {
                     type: "pushEvent",
                     payload: {
                       kind: "음성",
-                      text: `${ELDER.name}(${ELDER.age}) → ${target.name} 목소리 메시지 ${sec}초 전송`,
+                      text: `${elderWho()} → ${target.name} 목소리 메시지 ${sec}초 전송`,
                       color: "#8FA9CC",
                     },
                   });
@@ -2536,7 +2545,7 @@ function ElderHome() {
                   payBy: askPlan.approval || !amount ? null : "elder",
                   // 응급 대응은 긴급으로 (2026-10-05 — 컨시어지 승인 큐에 '긴급'으로 뜬다)
                   urgency: askSel.no === 12 ? "urgent" : "normal",
-                  assignee: LIVE_CONCIERGE,
+                  assignee: assigneeNow() || "",
                   photos: [],
                   status: askPlan.approval ? "awaitingPayment" : "requested",
                   history: [
@@ -2583,7 +2592,7 @@ function ElderHome() {
                   amount: 0,
                   preferredDate: null,
                   urgency: "normal",
-                  assignee: "박지현",
+                  assignee: assigneeNow() || "",
                   photos: [],
                   status: "requested",
                   history: [{ at: Date.now(), status: "requested", note: "어르신 해주세요 · 복지 혜택" }],
@@ -2611,7 +2620,7 @@ function ElderHome() {
               type: "pushEvent",
               payload: {
                 kind: "SOS",
-                text: `${ELDER.name}(${ELDER.age}) SOS 발신 · 가족·관제 동시 점등`,
+                text: `${elderWho()} SOS 발신 · 가족·관제 동시 점등`,
                 color: "#FF8A80",
               },
             });
@@ -2753,7 +2762,7 @@ function localPart(tz) {
   }
 }
 
-function FamilyThreads({ open, onToggle, threadFor, onPlay, onSend }) {
+function FamilyThreads({ targets, open, onToggle, threadFor, onPlay, onSend }) {
   const [rec, setRec] = useState(null); // { id, sec } — 녹음 중인 사람
   const [tooShort, setTooShort] = useState(null); // 스치듯 눌린 사람 id
   const timer = useRef(null);
@@ -2778,7 +2787,7 @@ function FamilyThreads({ open, onToggle, threadFor, onPlay, onSend }) {
 
   return (
     <div className="mt-3 space-y-2.5">
-      {VOICE_TO.map((v) => {
+      {targets.map((v) => {
         const isOpen = open === v.id;
         const thread = threadFor(v);
         const unread = thread.filter((m) => m.dir === "in" && !m.played).length;
