@@ -11,6 +11,7 @@ import {
   OUTING,
   elderWho,
 } from "../lib/mock";
+import { extraPayees } from "../lib/membership";
 import WelfareList from "../components/WelfareList";
 import { matchWelfare, profileFor, welfareCounts } from "../lib/welfare";
 import {
@@ -54,7 +55,8 @@ import { RESULT_TONE, VISIT_GRADES } from "../lib/visit-report";
 import { STORE_CATALOG } from "../lib/store";
 import { SERVICE_MENU, crewOf, daysUntil, kstYmd } from "../lib/requests";
 import { CONCIERGES } from "../lib/ops-admin";
-import ConciergeRequests, { NewRequestAlert, newRequestsFor } from "../components/ConciergeRequests";
+import ConciergeRequests, { ExtraPaidNotice, NewRequestAlert, newRequestsFor } from "../components/ConciergeRequests";
+import { svcTitle } from "../lib/booking";
 import { HelpCallCard, HelpCallPopup } from "../components/HelpCall";
 import { LIVE_TAG } from "../lib/live-household";
 import { conciergeChoices, elderNameOf, inCenter, meAs, people } from "../lib/people";
@@ -338,7 +340,7 @@ function ConciergePage() {
       age: ELDER.age,
       time: r.scheduledTime || "시간 미정",
       where: r.hospital || "",
-      detail: `해주세요 — ${r.type}`,
+      detail: `해주세요 — ${svcTitle(r.type)}`,
       crew: r.partner ? `${r.assignee} · ${r.partner} (2인)` : `${r.assignee || ME} 1인`,
       memo: r.detail || "",
     }));
@@ -384,6 +386,9 @@ function ConciergePage() {
   // 마무리 필요 — 오늘 끝난 건 중 리포트가 아직 안 나간 것
   // 이 앱의 방문 리포트는 이 가구 어르신 한 분 것이다 — 다른 (예시) 고객의 일정이 끝났다고 '작성하기'가 김순자 님 리포트를 열지 않게 (2026-10-19 점검 C-08)
   const myElder = live || center ? LIVE_ELDER : ELDER.name;
+  // 추가 이용 금액 받는 분 — 어르신 · 이 가구 보호자 중 앱으로 결제할 수 있는 분 (구두로 동의한 분을 컨시어지가 고른다 · 2026-10-22).
+  // 받는 분 화면은 같은 이름으로 자기 청구를 찾는다 (lib/membership.js extraPayees · lib/people.js meAs)
+  const payees = extraPayees(myElder);
   const wrapUp = today.rows.find((r) => r.state === "done" && r.client === myElder && !v.reportSent)?.client || null;
 
   // ── 마음사서함 (2026-09-22 명세) ──
@@ -504,6 +509,8 @@ function ConciergePage() {
 
           <main className="flex-1 space-y-3.5 overflow-y-auto px-4 pb-28 pt-4">
             {sosAck && sosDispatchBanner}
+            {/* 추가 이용 금액이 결제되면(받는 분 결제 · 기한 지나 등록 카드) 어느 탭에서든 알린다 (2026-10-22) */}
+            <ExtraPaidNotice charges={state.extraCharges} />
             {/* ════ 오늘 — 출근해서 제일 먼저 보는 것 ════ */}
             {tab === "today" && (
               <>
@@ -631,7 +638,7 @@ function ConciergePage() {
                 {/* 해주세요 — 보호자 · 어르신 부탁은 내 일정을 보고 승인 · 거절, 확정 건 진행 · 완료, 보낸 제안 (2026-10-05).
                     전에는 어르신 부탁만 보였고, 관제 확인 전에 '확인함'을 누를 수 있었다. */}
                 <div id="concierge-requests" className="scroll-mt-4">
-                  <ConciergeRequests requests={state.requests} payments={state.payments} me={ME} dispatch={dispatch} push={push} />
+                  <ConciergeRequests requests={state.requests} payments={state.payments} extraCharges={state.extraCharges} payees={payees} customer={myElder} me={ME} dispatch={dispatch} push={push} />
                 </div>
 
 
@@ -1969,10 +1976,10 @@ function ConciergePage() {
                     </label>
                   </div>
                   {propTo === "elder" && (
-                    <p className="mt-2 text-[11.5px] leading-[1.6] text-amber">어르신 하루 한도를 넘는 금액은 어르신이 수락한 뒤 보호자가 결제합니다.</p>
+                    <p className="mt-2 text-[11.5px] leading-[1.6] text-muted">어르신이 수락하면 결제 대기로 넘어가고, 어르신이나 가족 누구나 금액 제한 없이 결제합니다.</p>
                   )}
                   <label className="mt-2 block text-[11px] font-bold text-muted">
-                    2인 1조 서비스의 짝 (병원 동행 프리미엄 · 함께가요)
+                    2인 1조 서비스의 짝 (든든 병원동행 · 함께가요)
                     <select
                       value={propPartner}
                       onChange={(e) => setPropPartner(e.target.value)}
@@ -2223,7 +2230,7 @@ function ConciergePage() {
                       <SectionLabel>구매 진행중 — 완료사진</SectionLabel>
                       {purchasing.map((r) => (
                         <div key={r.id} className="mt-2 flex items-center gap-2">
-                          <span className="flex-1 text-[13px] font-bold text-ink">{r.type}</span>
+                          <span className="flex-1 text-[13px] font-bold text-ink">{svcTitle(r.type)}</span>
                           <button
                             onClick={() => {
                               dispatch({
@@ -2270,6 +2277,8 @@ function ConciergePage() {
                                 type: m.name,
                                 detail: `컨시어지 제안 — ${m.scope}`,
                                 amount: m.amount ?? null,
+                                // 이용 시간이 있는 서비스는 기본 시간으로 제안한다 — 금액이 기본 금액과 맞게 (2026-10-22 · lib/booking.js)
+                                ...(m.dur ? { durationMin: m.dur.min } : {}),
                                 preferredDate: null,
                                 urgency: "normal",
                                 assignee: ME,
@@ -2289,7 +2298,7 @@ function ConciergePage() {
                           }`}
                         >
                           <span className="min-w-0 flex-1">
-                            <span className="block text-[13px] font-bold text-ink">{m.name}</span>
+                            <span className="block text-[13px] font-bold text-ink">{m.title || m.name}</span>
                             <span className="mt-0.5 block text-[11.5px] leading-[1.5] text-muted">
                               {m.active ? m.priceLabel : "곧 시작합니다"}
                               {m.active && two ? (propPartner ? ` · 짝 ${propPartner}` : " · 위에서 짝을 먼저 고르세요") : ""}
