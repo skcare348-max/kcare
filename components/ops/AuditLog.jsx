@@ -36,10 +36,10 @@ const KIND_OF_TYPE = {
   setConsent: "edit", welfareAnswer: "message", addOpsMessage: "message", ackOpsMessage: "message",
   completeOnboarding: "signup", onboardingPatch: "signup", addPayment: "signup", setBilling: "signup", commitPendingOrder: "signup", addOrder: "signup",
   audit: "visit", advanceVisit: "visit", patchVisit: "visit", returnVisit: "visit", startNextVisit: "visit",
-  visitCheck: "visit", visitLoc: "visit", visitNote: "visit", visitGrade: "visit", visitPhoto: "visit", visitOps: "visit", visitViewed: "visit",
+  visitCheck: "visit", visitLoc: "visit", visitNote: "visit", visitGrade: "visit", visitText: "visit", visitLevel: "visit", visitPhoto: "visit", visitOps: "visit", visitViewed: "visit",
   escortSave: "visit", escortSend: "visit", escortViewed: "visit",
   addOpsNote: "edit", editOpsNote: "edit", removeOpsNote: "edit",
-  guardianPatch: "edit", setHealth: "edit", welfareStatus: "edit", addMyHospital: "edit", editMyHospital: "edit", removeMyHospital: "edit", setPriority: "edit", addReport: "edit", reset: "edit",
+  guardianPatch: "edit", setHealth: "edit", prefNote: "edit", welfareStatus: "edit", addMyHospital: "edit", editMyHospital: "edit", removeMyHospital: "edit", setPriority: "edit", addReport: "edit", reset: "edit",
   pushEvent: "ticker",
 };
 const kstDate = (t) => new Date(t + 9 * 3600 * 1000).toISOString().slice(0, 10);
