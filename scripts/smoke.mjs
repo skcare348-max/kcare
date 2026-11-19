@@ -28,6 +28,9 @@ const ROUTES = [
   // 대외 화면 — 서비스 소개(/) · 상담 신청(/consult). 2026-11-06 랜딩 요청으로 /service 는 / 로, /onboarding 은 /consult 로
   // 옮겨 주는 주소(301)가 됐다 (화면이 아니라서 여기 넣지 않는다). 시연 허브는 /demo, 예전 가입 상담 화면은 /demo-onboarding.
   "/", "/consult", "/demo", "/demo-onboarding", "/elder", "/care-profile",
+  // 공개 문서 — 이용약관 · 환불규정 · 개인정보 처리방침 (2026-11-10) · 위치정보이용약관 (2026-11-17).
+  // 가입 화면 동의 칸과 서비스 소개 바닥글이 잇는다
+  "/terms", "/refund", "/privacy", "/location",
   "/family", "/family/calendar", "/family/requests", "/family/my",
   "/family/store", "/family/watch", "/family/hospitals",
   // 보호자 홈 네 칸의 세부 화면 — 2026-10-15 디자인 시안
@@ -43,6 +46,8 @@ const ROUTES = [
   "/login/google",
   // 회원가입 · 영역별 로그인 입구 — 2026-10-06 (이용자 · 현장 · 영업 · 관제)
   "/join", "/partner/join", "/partner/login", "/ops/join", "/ops/login",
+  // 내 정보 관리 — 비밀번호 바꾸기 · 회원 탈퇴 (2026-11-18). 로그인 전이면 로그인 안내가 뜬다
+  "/account",
   // 리포트 3종은 고객에게 나가는 문서다 — 화면보다 오히려 더 봐야 한다.
   // 그동안 verify 만 돌고 있어서 본문 리포트의 회귀를 못 잡았다.
   "/report/verify", "/report/care", "/report/visit", "/report/escort", "/report/exec",

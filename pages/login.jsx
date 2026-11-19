@@ -6,12 +6,13 @@
 //   · '로그인 없이 데모 둘러보기' · 서버 저장 연결 표시 · '베타' 문구를 뺐다
 //   · 아래 링크는 'K-CARE 서비스 소개'(/) 하나
 // 로그인돼 있으면 누구로 들어와 있는지 · 어디에 저장되는지 · 계속하기 · 로그아웃을 보여 준다 (화면 위 '계정' 링크가 여기로 온다).
+import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import AreaShell from "../components/AreaShell";
 import { JoinPrompt } from "../components/AreaLogin";
 import MemberLogin from "../components/MemberLogin";
-import { AREAS, areaOfRole } from "../lib/centers";
+import { AREAS, areaOfRole, isFamilyRole } from "../lib/centers";
 import { PROVIDER_LABEL, logout, safeCallback, useAuth } from "../lib/auth";
 import { storageText, useSync } from "../lib/state";
 import { ROLE_HOME, ROLE_LABEL, householdName } from "../lib/test-accounts";
@@ -31,6 +32,7 @@ export default function LoginPage() {
   const callbackUrl = safeCallback(router.query.callbackUrl, "/");
   const [error, setError] = useState(null);
   const signedIn = auth.status === "authenticated" && auth.user;
+  const customer = signedIn && auth.user.provider === "member" && isFamilyRole(auth.user.role);
 
   useEffect(() => {
     if (typeof router.query.error === "string") setError(router.query.error);
@@ -55,6 +57,8 @@ export default function LoginPage() {
               {auth.user.email && <div className="truncate font-num text-[13px] text-muted">{auth.user.email}</div>}
             </div>
           </div>
+          {/* 어르신 · 보호자(가입한 회원)에게는 센터 이름 · 저장소 이름을 보이지 않는다 — 고객 입구다 (2026-11-18 점검) */}
+          {!customer && (
           <dl className="mt-4 space-y-1.5 rounded-xl bg-paper px-3.5 py-3 text-[13px]">
             <div className="flex gap-3">
               <dt className="w-[52px] shrink-0 text-muted">로그인</dt>
@@ -69,6 +73,7 @@ export default function LoginPage() {
               <dd className={`font-bold ${sync.mode === "server" && sync.status !== "error" ? "text-green" : "text-amber"}`}>{storageText(sync)}</dd>
             </div>
           </dl>
+          )}
           <button
             type="button"
             onClick={() => router.push(destination(auth.user.role))}
@@ -76,6 +81,12 @@ export default function LoginPage() {
           >
             {callbackUrl === "/" && ROLE_LABEL[auth.user.role] ? `${ROLE_LABEL[auth.user.role]} 화면으로 계속하기` : "계속하기"}
           </button>
+          {/* 가입한 회원 — 비밀번호 바꾸기 · 탈퇴 (pages/account.jsx · 2026-11-18) */}
+          {auth.user.provider === "member" && (
+            <Link href="/account" className="btn-press mt-2 block w-full rounded-xl border border-navy/15 py-3 text-center text-[14px] font-bold text-navy">
+              내 정보 관리 — 비밀번호 바꾸기 · 탈퇴
+            </Link>
+          )}
           <button
             type="button"
             onClick={async () => {
