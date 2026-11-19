@@ -50,6 +50,9 @@ const ACTION_TEXT = {
   invite: "가족 초대 링크 만듦",
   delete: "계정 삭제",
   move: "가족 옮김",
+  "password-reset": "임시 비밀번호 발급",
+  "password-change": "비밀번호 변경 (본인)",
+  "self-delete": "본인 탈퇴",
   "family-add": "가족 추가",
   "family-rename": "가족 이름 바꿈",
   "family-code": "가족 가입 코드 변경",
@@ -109,6 +112,7 @@ export default function CenterMembers({ onFamilies = null }) {
   const [roleOf, setRoleOf] = useState({}); // 승인 · 역할 변경 때 고른 역할
   const [copied, setCopied] = useState(null);
   const [move, setMove] = useState(null); // { m, to } — 가족 옮기기 창
+  const [pw, setPw] = useState(null); // { m, temp } — 임시 비밀번호: temp 가 없으면 발급 전 확인, 있으면 발급된 것을 한 번 보여 주는 창
 
   const load = useCallback(async () => {
     try {
@@ -163,6 +167,24 @@ export default function CenterMembers({ onFamilies = null }) {
     }
   };
   const act = (id, action, role, household) => send("PATCH", { id, action, role, household }, `${id}:${action}`);
+  // 임시 비밀번호 발급 — 응답으로 온 임시 비밀번호를 창에 한 번만 보여 준다 (다시 볼 수 없다 · 저장하지 않는다)
+  const issuePw = async (m) => {
+    setBusy(`${m.id}:password`);
+    setNotice(null);
+    try {
+      const r = await fetch("/api/members", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, action: "password" }) });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.tempPassword) setPw({ m, temp: j.tempPassword });
+      else setNotice(errText(j.error || `http-${r.status}`, j.message));
+    } catch (_) {
+      setNotice(errText("network"));
+    }
+    try {
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
   const rotate = () => send("POST", { action: "rotate-code" }, "code");
   const copied2s = (k) => {
     setCopied(k);
@@ -193,6 +215,25 @@ export default function CenterMembers({ onFamilies = null }) {
   // 어르신이 둘 이상인 가족 — 부부가 아니라 서로 다른 집이면 나눠야 한다
   const crowded = famOn ? families.map((f) => ({ f, names: eldersIn(f.id) })).filter((x) => x.names.length > 1) : [];
   const pickRole = (m) => roleOf[m.id] || m.role;
+  // 같은 가족에서 이미 사용 중인 보호자 수 — 이용약관 제4조: 보호자는 최대 5명
+  const guardiansIn = (hh) => members.filter((m) => m.status === "active" && m.role === "guardian" && (!famOn || m.household === hh)).length;
+  // 승인 · 다시 사용으로 어르신 · 보호자가 될 때 알릴 것 — 들어갈 가족 · 이미 있는 어르신 · 보호자 5명
+  const enterNote = (m, next) => {
+    if (!isUserRole(next)) return "";
+    if (!famOn) {
+      return next === "elder" && activeElders.length
+        ? ` 이 센터에는 이미 어르신 ${activeElders.join(" · ")} 님이 있습니다 — 지금은 한 센터 = 한 가족이라 약 · 일정 · 부탁 · SOS 기록을 함께 쓰고, 화면은 ${activeElders[0]} 님 기준으로 보입니다.`
+        : "";
+    }
+    const elders = eldersIn(m.home);
+    return ` ${famTitle(m.home)}에 들어갑니다.${
+      next === "elder" && elders.length
+        ? ` 이 가족에는 이미 어르신 ${elders.join(" · ")} 님이 있습니다 — 한 가족은 기록을 함께 쓰고 화면은 ${elders[0]} 님 기준으로 보입니다. 다른 댁이면 [가족 바꾸기]로 먼저 가족을 바꿔 주세요.`
+        : ""
+    }${next === "guardian" && guardiansIn(m.home) >= 5 ? ` 이 가족에는 보호자가 이미 ${guardiansIn(m.home)}명입니다 — 이용약관은 보호자를 최대 5명으로 정합니다.` : ""}${
+      isUserRole(m.requestedRole || m.role) ? "" : " 직원으로 신청한 가입이라 가족을 고르지 않았습니다 — 다른 가족이면 승인한 뒤 [옮기기]로 옮겨 주세요."
+    }`;
+  };
   // 직원을 어르신 · 보호자로 바꾸면 계정에 적힌 가족(직원으로 가입했으면 첫 가족)에 들어간다 — 그 가족의 기록이 보이게 되므로 미리 알린다
   const joinsNote = (m, next) => (famOn && isUserRole(next) && !isUserRole(m.role) ? ` 어르신 · 보호자가 되면 ${famTitle(m.home)}의 기록을 보게 됩니다 — 다른 가족이면 바꾼 뒤 회원 목록의 [옮기기]로 옮겨 주세요.` : "");
   // 관제 역할 · 관제 회원은 센터 관리자(ops1~3)만 바꾼다 — 관제 회원 화면에서는 고를 수 없게
@@ -206,7 +247,13 @@ export default function CenterMembers({ onFamilies = null }) {
       {m.id === data?.me && <Pill tone="info" className="ml-1">나</Pill>}
     </span>
   );
-  const statusCell = (m) => <Pill tone={MEMBER_STATUS[m.status]?.tone || "muted"}>{MEMBER_STATUS[m.status]?.label || m.status}</Pill>;
+  const statusCell = (m) => (
+    <span className="flex flex-wrap items-center gap-1">
+      <Pill tone={MEMBER_STATUS[m.status]?.tone || "muted"}>{MEMBER_STATUS[m.status]?.label || m.status}</Pill>
+      {/* 임시 비밀번호를 발급받고 아직 새 비밀번호를 정하지 않은 회원 */}
+      {m.tempPassword && m.status === "active" && <Pill tone="gold">임시 비밀번호</Pill>}
+    </span>
+  );
   const roleCell = (m) =>
     m.member && m.id !== data?.me && m.status !== "rejected" && !lockedForMe(m) ? (
       <span className="flex flex-wrap items-center gap-1">
@@ -272,6 +319,10 @@ export default function CenterMembers({ onFamilies = null }) {
   const actCell = (m) =>
     !m.member || m.id === data?.me || lockedForMe(m) ? null : m.status === "active" ? (
       <span className="flex flex-wrap items-center gap-1.5">
+        {/* 비밀번호를 잊은 회원 — 전화로 본인을 확인한 뒤 임시 비밀번호를 발급한다 (2026-11-18) */}
+        <Btn ghost small tone="muted" disabled={!!busy} aria-label={`${m.name} 임시 비밀번호 발급`} onClick={() => setPw({ m, temp: null })}>
+          비밀번호
+        </Btn>
         <Btn ghost small tone="warn" disabled={!!busy} onClick={() => setAsk({ id: m.id, action: "suspend", title: `${m.name} 님 사용을 정지합니다`, body: "지금 로그인해 있어도 15초 안에 저장 · 조회가 막힙니다. '다시 사용'으로 되돌릴 수 있습니다." })}>
           정지
         </Btn>
@@ -279,7 +330,20 @@ export default function CenterMembers({ onFamilies = null }) {
       </span>
     ) : m.status === "suspended" || m.status === "rejected" ? (
       <span className="flex flex-wrap items-center gap-1.5">
-        <Btn ghost small disabled={!!busy} onClick={() => act(m.id, "activate")}>
+        <Btn
+          ghost
+          small
+          disabled={!!busy}
+          onClick={() =>
+            setAsk({
+              id: m.id,
+              action: "activate",
+              title: m.status === "rejected" ? `${m.name} 님의 거절한 가입을 승인합니다` : `${m.name} 님이 다시 사용하게 합니다`,
+              // 거절했던 가입을 되살리는 것은 승인과 같다 — 어느 가족에 들어가는지 · 어르신이 이미 있는지 승인 때처럼 알린다
+              body: `${AREAS[areaOfRole(m.role)].label} 로그인(${AREAS[areaOfRole(m.role)].login})에서 다시 들어올 수 있게 됩니다.${m.status === "rejected" ? enterNote(m, m.role) : ""}`,
+            })
+          }
+        >
           다시 사용
         </Btn>
         {delBtn(m)}
@@ -411,20 +475,19 @@ export default function CenterMembers({ onFamilies = null }) {
                 </select>
               </label>
               {lockedForMe(m) && <span className="text-[11px] text-muted">관제 가입은 센터 관리자가 승인</span>}
-              <Btn small tone="ok" disabled={!!busy || lockedForMe(m)} onClick={() => setAsk({ id: m.id, action: "approve", role: pickRole(m), title: `${m.name} 님을 ${ROLE_LABEL[pickRole(m)]}(으)로 승인합니다`, body: `${AREAS[areaOfRole(pickRole(m))].label} 로그인(${AREAS[areaOfRole(pickRole(m))].login})에서 들어올 수 있게 됩니다.${
-                famOn
-                  ? isUserRole(pickRole(m))
-                    ? ` ${famTitle(m.home)}에 들어갑니다.${pickRole(m) === "elder" && eldersIn(m.home).length ? ` 이 가족에는 이미 어르신 ${eldersIn(m.home).join(" · ")} 님이 있습니다 — 한 가족은 기록을 함께 쓰고 화면은 ${eldersIn(m.home)[0]} 님 기준으로 보입니다. 다른 댁이면 승인한 뒤 회원 목록의 [옮기기]로 다른 가족으로 옮겨 주세요.` : ""}${isUserRole(m.requestedRole || m.role) ? "" : " 직원으로 신청한 가입이라 가족을 고르지 않았습니다 — 다른 가족이면 승인한 뒤 [옮기기]로 옮겨 주세요."}`
-                    : ""
-                  : pickRole(m) === "elder" && activeElders.length
-                    ? ` 이 센터에는 이미 어르신 ${activeElders.join(" · ")} 님이 있습니다 — 지금은 한 센터 = 한 가족이라 약 · 일정 · 부탁 · SOS 기록을 함께 쓰고, 화면은 ${activeElders[0]} 님 기준으로 보입니다.`
-                    : ""
-              }` })}>
+              <Btn small tone="ok" disabled={!!busy || lockedForMe(m)} onClick={() => setAsk({ id: m.id, action: "approve", role: pickRole(m), title: `${m.name} 님을 ${ROLE_LABEL[pickRole(m)]}(으)로 승인합니다`, body: `${AREAS[areaOfRole(pickRole(m))].label} 로그인(${AREAS[areaOfRole(pickRole(m))].login})에서 들어올 수 있게 됩니다.${enterNote(m, pickRole(m))}` })}>
                 승인
               </Btn>
-              <Btn small ghost tone="muted" disabled={!!busy} onClick={() => setAsk({ id: m.id, action: "reject", title: `${m.name} 님 가입을 거절합니다`, body: "거절한 아이디는 로그인할 수 없습니다. 나중에 '다시 사용'으로 되돌릴 수 있습니다." })}>
+              <Btn small ghost tone="muted" disabled={!!busy || lockedForMe(m)} onClick={() => setAsk({ id: m.id, action: "reject", title: `${m.name} 님 가입을 거절합니다`, body: "거절한 아이디는 로그인할 수 없습니다. 나중에 '다시 사용'으로 되돌릴 수 있습니다." })}>
                 거절
               </Btn>
+              {/* 다른 가족의 코드로 잘못 신청했을 때 — 승인하기 전에 가족부터 바꾼다 (2026-11-18 점검: 전에는 승인한 뒤에만 옮길 수 있어,
+                  그 사이 남의 가족 기록이 보였다) */}
+              {famOn && isUserRole(m.role) && families.length > 1 && (
+                <Btn small ghost tone="muted" disabled={!!busy} onClick={() => setMove({ m, to: families.find((f) => f.id !== m.household)?.id || "" })}>
+                  가족 바꾸기
+                </Btn>
+              )}
               </div>
             </li>
           ))}
@@ -443,7 +506,7 @@ export default function CenterMembers({ onFamilies = null }) {
             { k: "status", label: "상태", w: 90, render: (m) => statusCell(m) },
             { k: "createdAt", label: "가입 · 승인", w: 150, render: (m) => <span className="text-[12px] text-muted">{when(m.createdAt)}{m.approvedBy ? <><br />{m.status === "rejected" ? "거절" : "승인"} {m.approvedBy}</> : null}</span> },
             { k: "last", label: "마지막 로그인", w: 120, render: (m) => <span className="font-num text-[12px] text-muted">{when(m.lastLoginAt)}</span> },
-            { k: "act", label: "", w: 150, render: (m) => actCell(m) },
+            { k: "act", label: "", w: 215, render: (m) => actCell(m) },
           ]}
           rows={listed}
           empty="아직 회원이 없습니다 — 위 가입 링크를 나눠 주세요."
@@ -500,7 +563,7 @@ export default function CenterMembers({ onFamilies = null }) {
         open={!!ask}
         title={ask?.title || ""}
         body={ask?.body || ""}
-        confirmLabel={ask?.action === "approve" ? "승인" : ask?.action === "reject" ? "거절" : ask?.action === "suspend" ? "정지" : ask?.action === "delete" ? "삭제" : ask?.action === "rotate" ? "새 코드 만들기" : "적용"}
+        confirmLabel={ask?.action === "approve" ? "승인" : ask?.action === "reject" ? "거절" : ask?.action === "suspend" ? "정지" : ask?.action === "delete" ? "삭제" : ask?.action === "rotate" ? "새 코드 만들기" : ask?.action === "activate" ? "다시 사용" : "적용"}
         tone={ask?.action === "approve" ? "ok" : ask?.action === "suspend" || ask?.action === "reject" || ask?.action === "delete" ? "warn" : "navy"}
         onCancel={() => setAsk(null)}
         onConfirm={() => {
@@ -519,12 +582,66 @@ export default function CenterMembers({ onFamilies = null }) {
         )}
       </Confirm>
 
+      {/* 임시 비밀번호 — 발급 전에는 무엇이 바뀌는지, 발급 뒤에는 임시 비밀번호를 한 번만 보여 준다 */}
+      <Confirm
+        open={!!pw && !pw.temp}
+        title={pw ? `${pw.m.name} 님(${pw.m.loginId || pw.m.id})에게 임시 비밀번호를 발급합니다` : ""}
+        body=""
+        confirmLabel="발급"
+        tone="warn"
+        onCancel={() => setPw(null)}
+        onConfirm={() => {
+          const x = pw;
+          setPw(null);
+          if (x) issuePw(x.m);
+        }}
+      >
+        {pw && !pw.temp && (
+          <ul className="mt-2 list-disc space-y-1 pl-4 text-[13px] leading-[1.6] text-ink">
+            <li>
+              <b>전화로 본인인지 먼저 확인해 주세요</b> — 가입할 때 적은 이름{pw.m.phone ? ` · 휴대폰 ${pw.m.phone}` : ""}.
+            </li>
+            <li>지금 비밀번호는 바로 쓸 수 없게 되고, 이 아이디로 로그인해 있던 기기는 모두 다시 로그인해야 합니다.</li>
+            <li>임시 비밀번호로 로그인하면 새 비밀번호를 정해야 앱을 쓸 수 있습니다.</li>
+            <li>발급한 사실은 권한 변경 기록과 감사로그에 남습니다 (비밀번호는 남기지 않습니다).</li>
+          </ul>
+        )}
+      </Confirm>
+      <Confirm
+        open={!!pw?.temp}
+        title={pw?.temp ? `${pw.m.name} 님의 임시 비밀번호` : ""}
+        body=""
+        confirmLabel={copied === "pw" ? "복사됨" : "복사"}
+        cancelLabel="닫기"
+        tone="navy"
+        onCancel={() => setPw(null)}
+        onConfirm={() => {
+          copy(pw.temp);
+          copied2s("pw");
+        }}
+      >
+        {pw?.temp && (
+          <>
+            <p className="mt-3 select-all rounded-xl bg-navy/[.05] px-4 py-3 text-center font-num text-[24px] font-bold tracking-[.14em] text-navy" aria-label="임시 비밀번호">
+              {pw.temp}
+            </p>
+            <ul className="mt-3 list-disc space-y-1 pl-4 text-[13px] leading-[1.6] text-ink">
+              <li>
+                <b>이 창을 닫으면 다시 볼 수 없습니다.</b> 잘못 닫았으면 다시 발급해 주세요.
+              </li>
+              <li>전화로 불러 주세요 — 문자 · 메신저로 보내면 기록이 남습니다.</li>
+              <li>회원이 이 비밀번호로 로그인하면 새 비밀번호를 정하는 화면이 먼저 뜹니다.</li>
+            </ul>
+          </>
+        )}
+      </Confirm>
+
       {/* 가족 옮기기 — 사람만 옮긴다. 남긴 기록은 원래 가족에 그대로 있다 */}
       <Confirm
         open={!!move}
-        title={move ? `${move.m.name} 님(${ROLE_LABEL[move.m.role]})을 다른 가족으로 옮깁니다` : ""}
+        title={move ? (move.m.status === "pending" ? `${move.m.name} 님의 가입 신청을 다른 가족으로 돌립니다` : `${move.m.name} 님(${ROLE_LABEL[move.m.role]})을 다른 가족으로 옮깁니다`) : ""}
         body=""
-        confirmLabel="옮기기"
+        confirmLabel={move?.m.status === "pending" ? "가족 바꾸기" : "옮기기"}
         tone="warn"
         onCancel={() => setMove(null)}
         onConfirm={() => {
@@ -552,11 +669,18 @@ export default function CenterMembers({ onFamilies = null }) {
                   ))}
               </select>
             </label>
-            <ul className="mt-2 list-disc space-y-1 pl-4 text-[13px] leading-[1.6] text-ink">
-              <li>이 회원이 남긴 기록(일정 · 요청 · 음성 등)은 지금 가족에 그대로 남습니다 — 사람만 옮깁니다.</li>
-              <li>지금 로그인해 있으면 15초 안에 화면이 멈추고, 다시 로그인하면 새 가족의 기록이 열립니다.</li>
-              <li>옮긴 사실은 권한 변경 기록과 두 가족의 감사로그에 남습니다. 다시 옮겨 되돌릴 수 있습니다.</li>
-            </ul>
+            {move.m.status === "pending" ? (
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-[13px] leading-[1.6] text-ink">
+                <li>아직 승인 전이라 옮길 기록이 없습니다 — 승인하면 고른 가족에 들어갑니다.</li>
+                <li>바꾼 사실은 권한 변경 기록과 두 가족의 감사로그에 남습니다.</li>
+              </ul>
+            ) : (
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-[13px] leading-[1.6] text-ink">
+                <li>이 회원이 남긴 기록(일정 · 요청 · 음성 등)은 지금 가족에 그대로 남습니다 — 사람만 옮깁니다.</li>
+                <li>지금 로그인해 있으면 15초 안에 화면이 멈추고, 다시 로그인하면 새 가족의 기록이 열립니다.</li>
+                <li>옮긴 사실은 권한 변경 기록과 두 가족의 감사로그에 남습니다. 다시 옮겨 되돌릴 수 있습니다.</li>
+              </ul>
+            )}
           </>
         )}
       </Confirm>
